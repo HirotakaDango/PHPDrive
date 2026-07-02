@@ -130,6 +130,29 @@ function saveMetadata($data) {
   file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
 }
 
+function cleanupExpiredTrash() {
+  global $baseDir;
+  $meta = getMetadata();
+  $changed = false;
+  $thirtyDays = 30 * 24 * 60 * 60;
+  $now = time();
+  $trashBin = $baseDir . '/.drive_trash_bin';
+
+  foreach ($meta['trash'] as $uniq => $info) {
+    if ($now - $info['deleted_at'] > $thirtyDays) {
+      $full = $trashBin . '/' . $uniq;
+      if (file_exists($full)) {
+        recursiveDelete($full);
+      }
+      unset($meta['trash'][$uniq]);
+      $changed = true;
+    }
+  }
+  if ($changed) {
+    saveMetadata($meta);
+  }
+}
+
 function streamFileRange($filePath) {
   $size = filesize($filePath);
   $length = $size;
@@ -223,6 +246,8 @@ if ($reqPath) {
 }
 
 if ($api) {
+  cleanupExpiredTrash();
+
   if ($action === 'stream') {
     while (ob_get_level()) ob_end_clean();
     $file = $_GET['file'] ?? '';
@@ -548,7 +573,7 @@ if ($api) {
             }
           }
           usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-          echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, 8)]);
+          echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, 15)]);
           break;
 
         case 'read':
@@ -742,6 +767,7 @@ if (isset($_GET['batch'])) {
       .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
       
       header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 8px; background-color: var(--theme-surface); flex-shrink: 0; }
+      @media (min-width: 769px) { .menu-btn { display: none !important; } }
       .menu-btn { display: none; }
       .logo-container { display: flex; align-items: center; gap: 8px; width: 238px; padding-left: 4px; cursor: pointer; }
       .logo-img { width: 40px; height: 40px; border-radius: 8px; background: var(--theme-primary); color: var(--theme-on-primary); display: flex; align-items: center; justify-content: center; }
@@ -981,9 +1007,12 @@ if (isset($_GET['batch'])) {
             <span class="material-symbols-rounded">home</span> Home
           </a>
           <a class="nav-item" id="navStarred" onclick="app.setViewMode('starred')">
-              <span class="material-symbols-rounded">star</span> Starred
-            </a>
-            <div class="menu-divider" style="margin: 8px 16px;"></div>
+            <span class="material-symbols-rounded">star</span> Starred
+          </a>
+          <a class="nav-item" id="navTrash" onclick="app.setViewMode('trash')">
+            <span class="material-symbols-rounded">delete</span> Trash
+          </a>
+          <div class="menu-divider" style="margin: 8px 16px;"></div>
           <a class="nav-item" id="navInstall" onclick="app.installApp()">
             <span class="material-symbols-rounded">install_mobile</span> Install App
           </a>
@@ -1391,7 +1420,7 @@ if (isset($_GET['batch'])) {
         navigate(path, pushState = true) {
           this.currentPath = path;
           if (pushState) {
-            const url = path ? `?path=${encodeURIComponent(path)}` : window.location.pathname;
+            const url = path ? `?path=${encodeURIComponent(path).replace(/%2F/g, '/')}` : window.location.pathname;
             window.history.pushState({ path }, '', url);
           }
           this.clearSelection(null, true);
@@ -1586,6 +1615,11 @@ if (isset($_GET['batch'])) {
             return;
           }
 
+          const notice = document.createElement('div');
+          notice.style.cssText = "grid-column: 1/-1; text-align: center; font-style: italic; font-size: 13px; color: var(--theme-on-surface-variant); margin-bottom: 12px;";
+          notice.textContent = "Items in trash are deleted forever after 30 days.";
+          container.appendChild(notice);
+
           trashItems.forEach(item => {
           const el = document.createElement('div');
           const isSelected = this.selectedItems.has(item.uniq);
@@ -1605,7 +1639,7 @@ if (isset($_GET['batch'])) {
               e.stopPropagation();
               this.selectedItems.clear();
               this.selectedItems.add(item.uniq);
-              this.render();
+              this.syncSelectionUI();
               this.showTrashContextMenu(e, item);
             };
             
@@ -1743,6 +1777,17 @@ if (isset($_GET['batch'])) {
             if (p) card.classList.toggle('selected', this.selectedItems.has(p));
           });
           document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
+          
+          const delBtn = document.querySelector('#multiSelectActions .icon-btn[onclick="app.deleteSelected()"]');
+          if (delBtn) {
+            delBtn.title = this.currentViewMode === 'trash' ? 'Delete Permanently' : 'Move to Trash';
+            delBtn.innerHTML = this.currentViewMode === 'trash' ? '<span class="material-symbols-rounded">delete_forever</span>' : '<span class="material-symbols-rounded">delete</span>';
+          }
+          
+          const dlBtn = document.querySelector('#multiSelectActions .icon-btn[onclick="app.batchDownload(\'selected\')"]');
+          if (dlBtn) {
+            dlBtn.style.display = this.currentViewMode === 'trash' ? 'none' : 'flex';
+          }
         }
 
         toggleSelect(e, path) {
@@ -1991,7 +2036,7 @@ if (isset($_GET['batch'])) {
           if (!this.selectedItems.has(item.path)) {
             if (!e.ctrlKey && !e.metaKey) this.selectedItems.clear();
             this.selectedItems.add(item.path);
-            this.render();
+            this.syncSelectionUI();
           }
           
           const menu = document.getElementById('contextMenu');
@@ -2014,10 +2059,12 @@ if (isset($_GET['batch'])) {
               addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
             }
             addMenuItem('link', 'Copy Direct URL', () => {
-              const url = new URL(window.location.origin + window.location.pathname);
-              url.searchParams.set('path', this.currentPath);
-              if (!isFolder) url.searchParams.set('edit', item.path);
-              navigator.clipboard.writeText(url.toString());
+              let qs = '?';
+              if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}`;
+              if (!isFolder) qs += (qs === '?' ? '' : '&') + `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+              if (qs === '?') qs = '';
+              const url = window.location.origin + window.location.pathname + qs;
+              navigator.clipboard.writeText(url);
               this.showToast('URL copied to clipboard!');
             });
             addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
@@ -2063,8 +2110,17 @@ if (isset($_GET['batch'])) {
           addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
           
           menu.style.display = 'flex';
-          menu.style.left = `${e.clientX}px`;
-          menu.style.top = `${e.clientY}px`;
+          
+          let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+          let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
+          
+          const rect = menu.getBoundingClientRect();
+          if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+          if (y + rect.height > window.innerHeight) y -= rect.height;
+          if (x < 0) x = 8;
+          
+          menu.style.left = `${x}px`;
+          menu.style.top = `${y}px`;
         }
 
         showModal(action, oldPath = '') {
@@ -2124,6 +2180,19 @@ if (isset($_GET['batch'])) {
 
         async deleteSelected() {
           if (this.selectedItems.size === 0) return;
+          
+          if (this.currentViewMode === 'trash') {
+            if (!confirm('Permanently delete selected items?')) return;
+            const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: Array.from(this.selectedItems) });
+            if (res) {
+              this.showToast(`${this.selectedItems.size} item(s) permanently deleted`);
+              this.selectedItems.clear();
+              this.loadDirectory(this.currentPath);
+              this.renderPropertiesEmpty();
+            }
+            return;
+          }
+
           const res = await this.fetchAPI('trash', 'POST', { action: 'trash', items: Array.from(this.selectedItems) });
           if (res) {
             this.showToast(`${this.selectedItems.size} item(s) moved to Trash`);
@@ -2152,7 +2221,7 @@ if (isset($_GET['batch'])) {
 
         async emptyTrash() {
           if (!confirm('Empty entire Trash forever?')) return;
-          const res = await this.fetchAPI('empty_trash', 'POST');
+          const res = await this.fetchAPI('empty_trash', 'POST', { action: 'empty_trash' });
           if (res) {
             this.showToast('Trash cleared');
             this.loadDirectory(this.currentPath);
@@ -2211,10 +2280,10 @@ if (isset($_GET['batch'])) {
         async openPreviewOrEditor(item) {
           this.currentEditFile = item.path;
           
-          const url = new URL(window.location);
-          url.searchParams.set('path', this.currentPath);
-          url.searchParams.set('edit', item.path);
-          window.history.pushState({}, '', url);
+          let qs = '?';
+          if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}&`;
+          qs += `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+          window.history.pushState({}, '', qs);
           
           const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
@@ -2293,10 +2362,8 @@ if (isset($_GET['batch'])) {
             document.getElementById('mediaModalContent').innerHTML = '';
           }
           this.currentEditFile = null;
-          const url = new URL(window.location);
-          url.searchParams.delete('edit');
-          url.searchParams.set('path', this.currentPath);
-          window.history.pushState({}, '', url);
+          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+          window.history.pushState({}, '', qs);
         }
 
         insertMobileChar(char) {
@@ -2454,10 +2521,8 @@ if (isset($_GET['batch'])) {
           this.currentEditFile = null;
           this.editor = null;
           
-          const url = new URL(window.location);
-          url.searchParams.delete('edit');
-          url.searchParams.set('path', this.currentPath);
-          window.history.pushState({}, '', url);
+          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+          window.history.pushState({}, '', qs);
         }
 
         async saveFile() {
