@@ -248,6 +248,74 @@ if ($reqPath) {
 if ($api) {
   cleanupExpiredTrash();
 
+  if ($action === 'thumb') {
+    while (ob_get_level()) ob_end_clean();
+    $file = $_GET['file'] ?? '';
+    $full = $baseDir . '/' . $file;
+    if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) {
+      http_response_code(404);
+      exit;
+    }
+    
+    $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+    $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
+    $isVideo = in_array($ext, ['mp4', 'webm']);
+    
+    if ($ext === 'svg') {
+      header('Content-Type: image/svg+xml');
+      readfile($full);
+      exit;
+    }
+    
+    if ($isImage || $isVideo) {
+      $thumbDir = $baseDir . '/.drive_thumbnails';
+      if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
+      $hash = md5($full . filemtime($full));
+      $thumbPath = $thumbDir . '/' . $hash . '.webp';
+      
+      if (!file_exists($thumbPath)) {
+        if ($isImage && function_exists('imagecreatefromstring')) {
+          @ini_set('memory_limit', '256M'); // Prevent crash on large photos
+          $content = @file_get_contents($full);
+          if ($content) {
+            $img = @imagecreatefromstring($content);
+            if ($img) {
+              $width = imagesx($img);
+              $height = imagesy($img);
+              $newWidth = 320;
+              $newHeight = floor($height * ($newWidth / $width));
+              $tmp = imagecreatetruecolor($newWidth, $newHeight);
+              if ($ext === 'png' || $ext === 'gif') {
+                imagealphablending($tmp, false);
+                imagesavealpha($tmp, true);
+                $transparent = imagecolorallocatealpha($tmp, 255, 255, 255, 127);
+                imagefilledrectangle($tmp, 0, 0, $newWidth, $newHeight, $transparent);
+              }
+              imagecopyresampled($tmp, $img, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+              @imagewebp($tmp, $thumbPath, 50); // Quality 50 at 320px width guarantees size < 60KB
+              imagedestroy($img);
+              imagedestroy($tmp);
+            }
+          }
+        } elseif ($isVideo && function_exists('exec')) {
+          // Uses FFmpeg to extract frame 1 as a lightweight WebP 
+          @exec("ffmpeg -y -i " . escapeshellarg($full) . " -ss 00:00:01 -vframes 1 -vf scale=320:-1 -c:v libwebp -q:v 50 " . escapeshellarg($thumbPath) . " 2>/dev/null");
+        }
+      }
+      
+      if (file_exists($thumbPath)) {
+        header('Content-Type: image/webp');
+        header('Content-Length: ' . filesize($thumbPath));
+        readfile($thumbPath);
+        exit;
+      }
+    }
+    
+    // Fallback stream if thumbnail generation failed
+    streamFileRange($full);
+    exit;
+  }
+
   if ($action === 'stream') {
     while (ob_get_level()) ob_end_clean();
     $file = $_GET['file'] ?? '';
@@ -469,7 +537,7 @@ if ($api) {
           $meta = getMetadata();
           $files = [];
           $folders = [];
-          $items = array_diff(scandir($absPath), ['.', '..', '.drive_metadata.json', '.drive_trash_bin']);
+          $items = array_diff(scandir($absPath), ['.', '..', '.drive_metadata.json', '.drive_trash_bin', '.drive_thumbnails']);
           foreach ($items as $item) {
             $path = $absPath . '/' . $item;
             $stat = stat($path);
@@ -559,7 +627,7 @@ if ($api) {
           foreach ($iter as $file) {
             if ($file->isFile() && isAllowedExtension($file->getFilename())) {
               $path = $file->getPathname();
-              if (strpos($path, '.drive_trash_bin') === false && strpos($path, '.drive_metadata.json') === false) {
+              if (strpos($path, '.drive_trash_bin') === false && strpos($path, '.drive_thumbnails') === false && strpos($path, '.drive_metadata.json') === false) {
                 $recentFiles[] = [
                   'name' => $file->getFilename(),
                   'path' => ltrim(str_replace($baseDir, '', $path), '/'),
@@ -1142,6 +1210,7 @@ if (isset($_GET['batch'])) {
         <button class="icon-btn" onclick="app.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
         <div class="editor-title" id="editorTitle">filename.txt</div>
         <div class="header-actions" id="editorActions">
+          <button class="icon-btn" onclick="app.toggleEditorWrap()" id="editorWrapBtn" title="Toggle Word Wrap"><span class="material-symbols-rounded">wrap_text</span></button>
           <button class="icon-btn" onclick="app.editorFind()" title="Find and Replace"><span class="material-symbols-rounded">search</span></button>
           <button class="icon-btn" onclick="app.editorUndo()" title="Undo"><span class="material-symbols-rounded">undo</span></button>
           <button class="icon-btn" onclick="app.editorRedo()" title="Redo"><span class="material-symbols-rounded">redo</span></button>
@@ -1220,6 +1289,7 @@ if (isset($_GET['batch'])) {
           this.visibleFilesCount = 25;
           this.filteredFolders = [];
           this.filteredFiles = [];
+          this.editorWrap = localStorage.getItem('editorWrap') !== 'false';
 
           this.init();
         }
@@ -1711,8 +1781,8 @@ if (isset($_GET['batch'])) {
             } else {
               el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
               let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
-              if (item.isImage) {
-                const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
+              if (item.isImage || ['mp4', 'webm'].includes(item.ext)) {
+                const streamUrl = `?api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
                 previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
               }
               el.innerHTML = `
@@ -2053,6 +2123,7 @@ if (isset($_GET['batch'])) {
           if (this.selectedItems.size === 1) {
             if (isFolder) {
               addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
+              addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
             } else {
               addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
               addMenuItem('download', 'Download', () => window.location.href = `?download=${encodeURIComponent(item.path)}`);
@@ -2287,7 +2358,7 @@ if (isset($_GET['batch'])) {
           
           const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
-          if (item.isImage || ['mp4','webm','mp3','wav','ogg'].includes(item.ext)) {
+          if (item.isImage || ['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
             const mediaOverlay = document.getElementById('mediaOverlay');
             const modalContent = document.getElementById('mediaModalContent');
             mediaOverlay.style.display = 'flex';
@@ -2303,6 +2374,8 @@ if (isset($_GET['batch'])) {
                   <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
                   <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
                 </div>`;
+            } else if (item.ext === 'pdf') {
+              modalContent.innerHTML = `<iframe src="${streamUrl}" style="width: 90vw; height: 85vh; max-width: 1000px; border: none; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #fff;"></iframe>`;
             }
           } else {
             const overlay = document.getElementById('editorOverlay');
@@ -2319,37 +2392,33 @@ if (isset($_GET['batch'])) {
             mediaContainer.style.display = 'none';
             actions.style.display = 'none';
 
-            if (item.ext === 'pdf') {
-              mediaContainer.style.display = 'flex';
-              mediaContainer.innerHTML = `<iframe src="${streamUrl}" width="100%" height="100%" style="border:none;"></iframe>`;
-            } else {
-              actions.style.display = 'flex';
-              const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
-              if (res && res.success) {
-                if (window.innerWidth <= 768) {
-                  mobileContainer.style.display = 'flex';
-                  const textEl = document.getElementById('mobileTextarea');
-                  textEl.value = res.content;
-                } else {
-                  desktopContainer.style.display = 'flex';
-                  let mode = 'text/plain';
-                  if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
-                  if (item.ext === 'html') mode = 'text/html';
-                  if (item.ext === 'css') mode = 'text/css';
-                  if (item.ext === 'php') mode = 'application/x-httpd-php';
+            actions.style.display = 'flex';
+            this.updateEditorWrapUI();
+            const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
+            if (res && res.success) {
+              if (window.innerWidth <= 768) {
+                mobileContainer.style.display = 'flex';
+                const textEl = document.getElementById('mobileTextarea');
+                textEl.value = res.content;
+              } else {
+                desktopContainer.style.display = 'flex';
+                let mode = 'text/plain';
+                if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
+                if (item.ext === 'html') mode = 'text/html';
+                if (item.ext === 'css') mode = 'text/css';
+                if (item.ext === 'php') mode = 'application/x-httpd-php';
 
-                  this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
-                    lineNumbers: true,
-                    theme: this.theme === 'dark' ? 'material-darker' : 'default',
-                    mode: mode,
-                    indentUnit: 2,
-                    tabSize: 2,
-                    lineWrapping: true,
-                    viewportMargin: 10
-                  });
-                  this.editor.setValue(res.content);
-                  setTimeout(() => this.editor.refresh(), 50);
-                }
+                this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
+                  lineNumbers: true,
+                  theme: this.theme === 'dark' ? 'material-darker' : 'default',
+                  mode: mode,
+                  indentUnit: 2,
+                  tabSize: 2,
+                  lineWrapping: this.editorWrap,
+                  viewportMargin: 10
+                });
+                this.editor.setValue(res.content);
+                setTimeout(() => this.editor.refresh(), 50);
               }
             }
           }
@@ -2513,6 +2582,32 @@ if (isset($_GET['batch'])) {
             }
           }
           this.frSearch();
+        }
+
+        toggleEditorWrap() {
+          this.editorWrap = !this.editorWrap;
+          localStorage.setItem('editorWrap', this.editorWrap);
+          this.updateEditorWrapUI();
+          if (this.editor) {
+            this.editor.setOption('lineWrapping', this.editorWrap);
+          }
+        }
+
+        updateEditorWrapUI() {
+          const btn = document.getElementById('editorWrapBtn');
+          if (btn) {
+            const icon = btn.querySelector('.material-symbols-rounded');
+            if (icon) {
+              icon.textContent = this.editorWrap ? 'wrap_text' : 'segment';
+              btn.style.color = this.editorWrap ? 'var(--theme-primary)' : 'var(--theme-on-surface-variant)';
+            }
+          }
+          const mobileTa = document.getElementById('mobileTextarea');
+          if (mobileTa) {
+            mobileTa.setAttribute('wrap', this.editorWrap ? 'soft' : 'off');
+            mobileTa.style.whiteSpace = this.editorWrap ? 'pre-wrap' : 'pre';
+            mobileTa.style.overflowX = this.editorWrap ? 'hidden' : 'auto';
+          }
         }
 
         closeEditor() {
