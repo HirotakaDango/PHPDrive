@@ -357,10 +357,19 @@ if ($api) {
         case 'upload':
           if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
           $uploaded = 0;
+          $paths = $_POST['paths'] ?? [];
           foreach ($_FILES['files']['name'] as $i => $name) {
             if (isAllowedExtension($name)) {
-              $dest = $absPath . '/' . $name;
-              if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+              if (!empty($paths[$i])) {
+                // Sanitize path traversals and rebuild directory tree structure recursively
+                $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
+                $dest = $absPath . '/' . $relPathClean;
+                $targetDir = dirname($dest);
+                if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
+              } else {
+                $dest = $absPath . '/' . $name;
+                if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+              }
               if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) $uploaded++;
             }
           }
@@ -1205,10 +1214,12 @@ if (isset($_GET['batch'])) {
 
     <div class="floating-menu" id="newMenu">
       <div class="menu-item" onclick="app.showModal('addFolder')"><span class="material-symbols-rounded">create_new_folder</span>New folder</div>
-      <div class="menu-divider"></div>
       <div class="menu-item" onclick="app.showModal('addFile')"><span class="material-symbols-rounded">note_add</span>New file</div>
+      <div class="menu-divider"></div>
       <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
+      <div class="menu-item" onclick="document.getElementById('folderUploadInput').click()"><span class="material-symbols-rounded">drive_folder_upload</span>Folder upload</div>
       <input type="file" id="fileUploadInput" multiple class="hidden" onchange="app.handleFilesSelect(event)">
+      <input type="file" id="folderUploadInput" webkitdirectory directory multiple class="hidden" onchange="app.handleFolderSelect(event)">
     </div>
 
     <div class="floating-menu" id="moreMenu">
@@ -1311,6 +1322,18 @@ if (isset($_GET['batch'])) {
       </div>
     </div>
 
+    <!-- Google Drive-Style Upload Progress Widget -->
+    <div id="uploadWidget" style="position: fixed; bottom: 16px; right: 16px; width: calc(100% - 32px); max-width: 360px; background: var(--theme-surface-container-high); border: 1px solid var(--theme-outline-variant); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5000; display: none; flex-direction: column; overflow: hidden; border-bottom: 2px solid var(--theme-primary);">
+      <div id="uploadWidgetHeader" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--theme-surface-container); border-bottom: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none;" onclick="app.uploadQueue.toggleCollapse()">
+        <span id="uploadWidgetTitle" style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface);">Uploading files...</span>
+        <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
+          <button class="icon-btn" id="uploadWidgetToggleBtn" style="width: 28px; height: 28px;" onclick="app.uploadQueue.toggleCollapse()" title="Show more/less"><span class="material-symbols-rounded">expand_more</span></button>
+          <button class="icon-btn" id="uploadWidgetCloseBtn" style="width: 28px; height: 28px;" onclick="app.uploadQueue.cancelAll()" title="Cancel all"><span class="material-symbols-rounded">close</span></button>
+        </div>
+      </div>
+      <div id="uploadWidgetList" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 0; background: var(--theme-surface);"></div>
+    </div>
+
     <div class="snackbar-container" id="snackbarContainer"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
@@ -1360,6 +1383,7 @@ if (isset($_GET['batch'])) {
           this.filteredFolders = [];
           this.filteredFiles = [];
           this.editorWrap = localStorage.getItem('editorWrap') !== 'false';
+          this.uploadQueue = new UploadQueue(this);
 
           this.init();
         }
@@ -1483,11 +1507,20 @@ if (isset($_GET['batch'])) {
             dropZone.classList.add('drag-over'); 
           });
           dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-          dropZone.addEventListener('drop', (e) => {
+          dropZone.addEventListener('drop', async (e) => {
             if (window.innerWidth <= 768) return;
             e.preventDefault();
             dropZone.classList.remove('drag-over');
-            if (e.dataTransfer.files.length) this.uploadFiles(e.dataTransfer.files);
+            
+            if (e.dataTransfer.items && e.dataTransfer.items.length) {
+              this.showToast('Scanning dropped items...');
+              const { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
+              if (files.length > 0) {
+                this.uploadFiles(files, paths);
+              }
+            } else if (e.dataTransfer.files.length) {
+              this.uploadFiles(e.dataTransfer.files);
+            }
           });
 
           document.getElementById('searchInput').addEventListener('input', (e) => {
@@ -2403,39 +2436,63 @@ if (isset($_GET['batch'])) {
           e.target.value = '';
         }
 
-        uploadFiles(files) {
-          const formData = new FormData();
-          formData.append('action', 'upload');
-          for (let i = 0; i < files.length; i++) formData.append('files[]', files[i]);
+        handleFolderSelect(e) {
+          if (e.target.files.length) {
+            const files = e.target.files;
+            const paths = [];
+            for (let i = 0; i < files.length; i++) {
+              paths.push(files[i].webkitRelativePath || '');
+            }
+            this.uploadFiles(files, paths);
+          }
+          e.target.value = '';
+        }
+
+        async scanDroppedItems(items) {
+          const files = [];
+          const paths = [];
           
-          const toast = document.createElement('div');
-          toast.className = 'snackbar show';
-          toast.innerHTML = `Uploading... <span id="up-progress" style="font-weight:bold;margin-left:8px;">0%</span>`;
-          document.getElementById('snackbarContainer').appendChild(toast);
-          
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', `?api=true&action=upload&path=${encodeURIComponent(this.currentPath)}`);
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              const percent = Math.round((e.loaded / e.total) * 100);
-              const progressEl = document.getElementById('up-progress');
-              if (progressEl) progressEl.textContent = percent + '%';
+          const readAllEntries = async (dirReader) => {
+            let allEntries = [];
+            const read = async () => {
+              const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
+              if (entries && entries.length > 0) {
+                allEntries = allEntries.concat(entries);
+                await read();
+              }
+            };
+            await read();
+            return allEntries;
+          };
+
+          const traverseEntry = async (entry, path = '') => {
+            if (entry.isFile) {
+              const file = await new Promise((resolve) => entry.file(resolve));
+              files.push(file);
+              paths.push(path + file.name);
+            } else if (entry.isDirectory) {
+              const dirReader = entry.createReader();
+              const entries = await readAllEntries(dirReader);
+              for (const childEntry of entries) {
+                await traverseEntry(childEntry, path + entry.name + '/');
+              }
             }
           };
-          xhr.onload = () => {
-            toast.remove();
-            try {
-              const res = JSON.parse(xhr.responseText);
-              if (res.success) {
-                this.showToast(`${res.uploaded} file(s) uploaded`);
-                this.loadDirectory(this.currentPath);
-              } else throw new Error(res.error || 'Upload error');
-            } catch (err) {
-              this.showToast(err.message || 'Upload failed');
+
+          for (let i = 0; i < items.length; i++) {
+            const entry = items[i].webkitGetAsEntry();
+            if (entry) {
+              await traverseEntry(entry);
             }
-          };
-          xhr.onerror = () => { toast.remove(); this.showToast('Upload request failed'); };
-          xhr.send(formData);
+          }
+
+          return { files, paths };
+        }
+
+        uploadFiles(files, paths = []) {
+          for (let i = 0; i < files.length; i++) {
+            this.uploadQueue.add(files[i], paths[i] || '');
+          }
         }
 
         async openPreviewOrEditor(item) {
@@ -2779,6 +2836,202 @@ if (isset($_GET['batch'])) {
               setTimeout(() => toast.remove(), 300);
             }, 3000);
           });
+        }
+      }
+
+      class UploadQueue {
+        constructor(manager) {
+          this.manager = manager;
+          this.queue = [];
+          this.activeXhr = null;
+          this.isCollapsed = false;
+        }
+
+        add(file, path) {
+          const id = 'up_' + Math.random().toString(36).substring(2, 9);
+          this.queue.push({
+            id: id,
+            file: file,
+            path: path,
+            name: file.name,
+            progress: 0,
+            status: 'pending',
+            xhr: null
+          });
+          this.renderItem(this.queue[this.queue.length - 1]);
+          this.updateHeader();
+          if (!this.activeXhr) {
+            this.processNext();
+          }
+        }
+
+        async processNext() {
+          if (this.activeXhr) return;
+          const next = this.queue.find(item => item.status === 'pending');
+          if (!next) {
+            this.manager.showToast('All uploads complete');
+            this.manager.loadDirectory(this.manager.currentPath);
+            return;
+          }
+
+          next.status = 'uploading';
+          this.updateItemUI(next);
+          this.updateHeader();
+
+          const formData = new FormData();
+          formData.append('action', 'upload');
+          formData.append('files[]', next.file);
+          formData.append('paths[]', next.path);
+
+          const xhr = new XMLHttpRequest();
+          next.xhr = xhr;
+          this.activeXhr = xhr;
+
+          xhr.open('POST', `?api=true&action=upload&path=${encodeURIComponent(this.manager.currentPath)}`);
+          
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              next.progress = Math.round((e.loaded / e.total) * 100);
+              this.updateItemUI(next);
+            }
+          };
+
+          xhr.onload = () => {
+            this.activeXhr = null;
+            try {
+              const res = JSON.parse(xhr.responseText);
+              if (res.success && res.uploaded > 0) {
+                next.status = 'success';
+                next.progress = 100;
+              } else {
+                next.status = 'failed';
+              }
+            } catch (err) {
+              next.status = 'failed';
+            }
+            this.updateItemUI(next);
+            this.processNext();
+          };
+
+          xhr.onerror = () => {
+            this.activeXhr = null;
+            next.status = 'failed';
+            this.updateItemUI(next);
+            this.processNext();
+          };
+
+          xhr.send(formData);
+        }
+
+        cancel(id) {
+          const item = this.queue.find(i => i.id === id);
+          if (!item) return;
+          if (item.status === 'uploading' && item.xhr) {
+            item.xhr.abort();
+            this.activeXhr = null;
+          }
+          item.status = 'cancelled';
+          this.updateItemUI(item);
+          this.processNext();
+        }
+
+        cancelAll() {
+          this.queue.forEach(item => {
+            if (item.status === 'uploading' && item.xhr) {
+              item.xhr.abort();
+            }
+            if (item.status === 'queued' || item.status === 'uploading') {
+              item.status = 'cancelled';
+            }
+          });
+          this.activeXhr = null;
+          this.queue = [];
+          document.getElementById('uploadWidgetList').innerHTML = '';
+          document.getElementById('uploadWidget').style.display = 'none';
+        }
+
+        renderItem(item) {
+          const list = document.getElementById('uploadWidgetList');
+          const itemEl = document.createElement('div');
+          itemEl.id = `widget_item_${item.id}`;
+          itemEl.style.cssText = "display: flex; flex-direction: column; padding: 8px 16px; border-bottom: 1px solid var(--theme-outline-variant); background: var(--theme-surface);";
+          
+          itemEl.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                <span class="material-symbols-rounded" id="icon_${item.id}" style="font-size: 20px; color: var(--theme-on-surface-variant); flex-shrink: 0;">upload_file</span>
+                <span style="font-size: 13px; font-weight: 500; color: var(--theme-on-surface); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;">${item.name}</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                <span id="status_${item.id}" style="font-size: 11px; color: var(--theme-on-surface-variant);">Queued</span>
+                <button class="icon-btn" id="cancel_btn_${item.id}" style="width: 24px; height: 24px;" onclick="app.uploadQueue.cancel('${item.id}')"><span class="material-symbols-rounded" style="font-size: 16px;">close</span></button>
+              </div>
+            </div>
+            <div style="width: 100%; height: 4px; background: var(--theme-surface-container-high); border-radius: 2px; overflow: hidden;">
+              <div id="progress_${item.id}" style="width: 0%; height: 100%; background: var(--theme-primary); transition: width 0.1s;"></div>
+            </div>
+          `;
+          list.appendChild(itemEl);
+          document.getElementById('uploadWidget').style.display = 'flex';
+        }
+
+        updateItemUI(item) {
+          const progressEl = document.getElementById(`progress_${item.id}`);
+          const statusEl = document.getElementById(`status_${item.id}`);
+          const cancelBtn = document.getElementById(`cancel_btn_${item.id}`);
+          const iconEl = document.getElementById(`icon_${item.id}`);
+
+          if (progressEl) progressEl.style.width = `${item.progress}%`;
+          if (statusEl) {
+            if (item.status === 'uploading') statusEl.textContent = `${item.progress}%`;
+            else if (item.status === 'queued') statusEl.textContent = 'Queued';
+            else if (item.status === 'success') {
+              statusEl.textContent = 'Completed';
+              statusEl.style.color = '#4caf50';
+              if (cancelBtn) cancelBtn.style.display = 'none';
+              if (iconEl) iconEl.textContent = 'check_circle';
+            } else if (item.status === 'failed') {
+              statusEl.textContent = 'Failed';
+              statusEl.style.color = '#f44336';
+              if (cancelBtn) cancelBtn.style.display = 'none';
+              if (iconEl) iconEl.textContent = 'error';
+            } else if (item.status === 'cancelled') {
+              statusEl.textContent = 'Cancelled';
+              statusEl.style.color = 'var(--theme-on-surface-variant)';
+              if (cancelBtn) cancelBtn.style.display = 'none';
+              if (iconEl) iconEl.textContent = 'cancel';
+            }
+          }
+        }
+
+        updateHeader() {
+          const active = this.queue.filter(i => i.status === 'uploading' || i.status === 'queued');
+          const title = document.getElementById('uploadWidgetTitle');
+          if (title) {
+            if (active.length > 0) {
+              title.textContent = `Uploading ${active.length} item(s)...`;
+            } else {
+              const succeeded = this.queue.filter(i => i.status === 'success').length;
+              title.textContent = `Uploaded ${succeeded} item(s)`;
+            }
+          }
+        }
+
+        toggleCollapse() {
+          this.isCollapsed = !this.isCollapsed;
+          const widget = document.getElementById('uploadWidget');
+          const list = document.getElementById('uploadWidgetList');
+          const toggleBtn = document.getElementById('uploadWidgetToggleBtn');
+          if (toggleBtn) {
+            const icon = toggleBtn.querySelector('span');
+            if (icon) icon.textContent = this.isCollapsed ? 'expand_less' : 'expand_more';
+          }
+          if (this.isCollapsed) {
+            list.style.display = 'none';
+            widget.style.height = 'auto';
+          } else {
+            list.style.display = 'flex';
+          }
         }
       }
 
