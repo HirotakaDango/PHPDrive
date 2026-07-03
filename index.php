@@ -521,6 +521,25 @@ if ($api) {
           echo json_encode(['success' => true, 'token' => $token]);
           break;
 
+        case 'unzip':
+          $item = $input['item'] ?? '';
+          $src = $baseDir . '/' . $item;
+          if (!isValidPath($baseDir, $src) || !file_exists($src) || strtolower(pathinfo($src, PATHINFO_EXTENSION)) !== 'zip') {
+            throw new Exception('Invalid zip file');
+          }
+          if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
+          $zip = new ZipArchive;
+          if ($zip->open($src) === TRUE) {
+            $extractTarget = dirname($src) . '/' . pathinfo($src, PATHINFO_FILENAME);
+            if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
+            $zip->extractTo($extractTarget);
+            $zip->close();
+            echo json_encode(['success' => true]);
+          } else {
+            throw new Exception('Failed to extract ZIP archive');
+          }
+          break;
+
         case 'toggle_auth':
           $config['protected'] = !$config['protected'];
           if (!empty($input['new_pass'])) $config['password'] = password_hash($input['new_pass'], PASSWORD_DEFAULT);
@@ -656,12 +675,36 @@ if ($api) {
           $full = $baseDir . '/' . $file;
           if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
           $stat = stat($full);
+          $is_dir = is_dir($full);
+          $size = $stat['size'];
+          $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
+          $contentStr = '';
+          
+          if ($is_dir) {
+            $total_files = 0;
+            $total_folders = 0;
+            $total_size = 0;
+            // Recursively calculate bulk size and contents count
+            $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+            foreach ($iter as $f) {
+              if ($f->isDir()) {
+                $total_folders++;
+              } else {
+                $total_files++;
+                $total_size += $f->getSize();
+              }
+            }
+            $size = $total_size;
+            $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+          }
+
           echo json_encode([
             'success' => true,
             'data' => [
               'name' => basename($file),
-              'type' => is_dir($full) ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')',
-              'size' => formatBytes($stat['size']),
+              'type' => $typeStr,
+              'size' => formatBytes($size),
+              'contents' => $contentStr,
               'modified' => date("Y-m-d H:i:s", $stat['mtime']),
               'created' => date("Y-m-d H:i:s", $stat['ctime']),
               'permissions' => substr(sprintf('%o', fileperms($full)), -4)
@@ -2023,6 +2066,7 @@ if (isset($_GET['batch'])) {
               </div>
               <div class="prop-row"><span class="prop-label">Type</span><span class="prop-val">${p.type}</span></div>
               <div class="prop-row"><span class="prop-label">Size</span><span class="prop-val">${p.size}</span></div>
+              ${p.contents ? `<div class="prop-row"><span class="prop-label">Contents</span><span class="prop-val">${p.contents}</span></div>` : ''}
               <div class="prop-row"><span class="prop-label">Modified</span><span class="prop-val">${p.modified}</span></div>
               <div class="prop-row"><span class="prop-label">Created</span><span class="prop-val">${p.created}</span></div>
               <div class="prop-row"><span class="prop-label">Permissions</span><span class="prop-val">${p.permissions}</span></div>
@@ -2134,6 +2178,9 @@ if (isset($_GET['batch'])) {
               addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
               addMenuItem('download', 'Download', () => window.location.href = `?download=${encodeURIComponent(item.path)}`);
               addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
+              if (item.ext === 'zip') {
+                addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
+              }
             }
             addMenuItem('link', 'Copy Direct URL', () => {
               let qs = '?';
@@ -2301,6 +2348,15 @@ if (isset($_GET['batch'])) {
           const res = await this.fetchAPI('empty_trash', 'POST', { action: 'empty_trash' });
           if (res) {
             this.showToast('Trash cleared');
+            this.loadDirectory(this.currentPath);
+          }
+        }
+
+        async extractZip(path) {
+          this.showToast('Extracting ZIP...');
+          const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path });
+          if (res) {
+            this.showToast('ZIP extracted successfully!');
             this.loadDirectory(this.currentPath);
           }
         }
