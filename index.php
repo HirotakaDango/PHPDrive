@@ -623,7 +623,7 @@ if ($api) {
         case 'recents':
           $meta = getMetadata();
           $recentFiles = [];
-          $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir));
+          $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS));
           foreach ($iter as $file) {
             if ($file->isFile() && isAllowedExtension($file->getFilename())) {
               $path = $file->getPathname();
@@ -699,7 +699,7 @@ if (isset($_GET['batch'])) {
   
   if ($zip->open($zipName, ZipArchive::CREATE) === TRUE) {
     if ($type === 'context') {
-      $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($absPath));
+      $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($absPath, FilesystemIterator::SKIP_DOTS));
       foreach ($iter as $file) {
         if ($file->isFile() && isAllowedExtension($file->getFilename())) {
           $localPath = ltrim(str_replace($absPath, '', $file->getPathname()), '/');
@@ -714,7 +714,7 @@ if (isset($_GET['batch'])) {
           if (is_file($full) && isAllowedExtension($item)) {
             $zip->addFile($full, basename($item));
           } elseif (is_dir($full)) {
-            $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full));
+            $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS));
             foreach ($iter as $f) {
               if ($f->isFile() && isAllowedExtension($f->getFilename())) {
                 $localPath = ltrim(str_replace($baseDir, '', $f->getPathname()), '/');
@@ -1535,12 +1535,18 @@ if (isset($_GET['batch'])) {
               this.loadRecents();
               
               if (this.initialEditFile) {
+                // Normalize initialEditFile to deeply support both simple basenames and full relative paths
+                let targetPath = this.initialEditFile;
+                if (!targetPath.includes('/') && this.currentPath) {
+                  targetPath = this.currentPath + '/' + targetPath;
+                }
+                
                 // Failsafe creation if it's out of pagination chunks
-                const target = this.data.files.find(f => f.path === this.initialEditFile) || { 
-                  path: this.initialEditFile, 
-                  name: this.initialEditFile.split('/').pop(), 
-                  ext: this.initialEditFile.split('.').pop().toLowerCase(),
-                  isImage: ['png','jpg','jpeg','gif','svg'].includes(this.initialEditFile.split('.').pop().toLowerCase()) 
+                const target = this.data.files.find(f => f.path === targetPath || f.path === this.initialEditFile || f.name === this.initialEditFile) || { 
+                  path: targetPath, 
+                  name: targetPath.split('/').pop(), 
+                  ext: targetPath.split('.').pop().toLowerCase(),
+                  isImage: ['png','jpg','jpeg','gif','svg'].includes(targetPath.split('.').pop().toLowerCase()) 
                 };
                 this.openPreviewOrEditor(target);
                 this.initialEditFile = null;
@@ -2375,7 +2381,14 @@ if (isset($_GET['batch'])) {
                   <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
                 </div>`;
             } else if (item.ext === 'pdf') {
-              modalContent.innerHTML = `<iframe src="${streamUrl}" style="width: 90vw; height: 85vh; max-width: 1000px; border: none; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #fff;"></iframe>`;
+              modalContent.innerHTML = `
+                <div style="width: 90vw; height: 85vh; max-width: 1000px; background: var(--theme-surface); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+                  <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
+                    <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
+                    <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
+                  </div>
+                  <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
+                </div>`;
             }
           } else {
             const overlay = document.getElementById('editorOverlay');
