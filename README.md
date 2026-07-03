@@ -1,5 +1,8 @@
 # PHPDrive
 
+<img width="1280" height="720" alt="Screenshot_20260703_120729" src="https://github.com/user-attachments/assets/10e84ad2-fc26-4efd-abb4-c8c860e5852e" />
+
+
 A fast, minimal, and open-source file manager contained entirely in a single PHP file. 
 
 PHPDrive provides a fully-featured web interface to manage files and directories directly from your browser. It features a responsive, Material Design-inspired interface with progressive web app (PWA) capabilities.
