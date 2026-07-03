@@ -1240,10 +1240,19 @@ if (isset($_GET['batch'])) {
       </div>
     </div>
 
+    <!-- Dedicated Image Preview Overlay (Auto-fits Image Scale) -->
+    <div class="modal-overlay" id="imageOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) app.closeImage()">
+      <div style="max-width: 95%; max-height: 95%; width: auto; background: transparent; box-shadow: none; padding: 0; display: flex; align-items: center; justify-content: center; position: relative;">
+        <button class="icon-btn" onclick="app.closeImage()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
+        <div id="imageModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 90vh;"></div>
+      </div>
+    </div>
+
+    <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
     <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) app.closeMedia()">
-      <div class="modal" style="max-width: 90%; max-height: 90%; width: auto; background: transparent; box-shadow: none; padding: 0; align-items: center; justify-content: center; position: relative;">
-        <button class="icon-btn" onclick="app.closeMedia()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
-        <div id="mediaModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 80vh;"></div>
+      <div class="modal" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
+        <button class="icon-btn" onclick="app.closeMedia()" style="position: absolute; top: 16px; right: 16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
+        <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
       </div>
     </div>
 
@@ -2443,32 +2452,45 @@ if (isset($_GET['batch'])) {
           
           const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
-          if (item.isImage || ['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
+          if (item.isImage) {
+            const imageOverlay = document.getElementById('imageOverlay');
+            const imageContent = document.getElementById('imageModalContent');
+            imageOverlay.style.display = 'flex';
+            imageContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">`;
+          } else if (['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
             const mediaOverlay = document.getElementById('mediaOverlay');
-            const modalContent = document.getElementById('mediaModalContent');
-            mediaOverlay.style.display = 'flex';
+            const mediaContent = document.getElementById('mediaModalContent');
+            const mediaContainer = document.getElementById('mediaModalContainer');
             
-            if (item.isImage) {
-              modalContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 80vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">`;
-            } else if (['mp4','webm'].includes(item.ext)) {
-              modalContent.innerHTML = `<video controls autoplay preload="metadata" style="max-width: 100%; max-height: 80vh; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
-            } else if (['mp3','wav','ogg'].includes(item.ext)) {
-              modalContent.innerHTML = `
-                <div style="background: var(--theme-surface-container-low); padding: 24px; border-radius: 24px; display: flex; flex-direction: column; align-items: center; gap: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
-                  <div class="media-art" style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
-                  <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
-                  <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
-                </div>`;
-            } else if (item.ext === 'pdf') {
-              modalContent.innerHTML = `
-                <div style="width: 90vw; height: 85vh; max-width: 1000px; background: var(--theme-surface); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+            if (item.ext === 'pdf') {
+              mediaContainer.style.maxWidth = '1000px';
+              mediaContainer.style.width = '95%';
+              mediaContainer.style.padding = '0';
+              mediaContent.innerHTML = `
+                <div style="width: 100%; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
                   <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
                     <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
                     <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
                   </div>
                   <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
                 </div>`;
+            } else if (['mp4','webm'].includes(item.ext)) {
+              mediaContainer.style.maxWidth = '550px';
+              mediaContainer.style.width = '90%';
+              mediaContainer.style.padding = '24px';
+              mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
+            } else if (['mp3','wav','ogg'].includes(item.ext)) {
+              mediaContainer.style.maxWidth = '550px';
+              mediaContainer.style.width = '90%';
+              mediaContainer.style.padding = '24px';
+              mediaContent.innerHTML = `
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%;">
+                  <div class="media-art" style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
+                  <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
+                  <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
+                </div>`;
             }
+            mediaOverlay.style.display = 'flex';
           } else {
             const overlay = document.getElementById('editorOverlay');
             const actions = document.getElementById('editorActions');
@@ -2516,6 +2538,17 @@ if (isset($_GET['batch'])) {
           }
         }
         
+        closeImage() {
+          const overlay = document.getElementById('imageOverlay');
+          if (overlay) {
+            overlay.style.display = 'none';
+            document.getElementById('imageModalContent').innerHTML = '';
+          }
+          this.currentEditFile = null;
+          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+          window.history.pushState({}, '', qs);
+        }
+
         closeMedia() {
           const overlay = document.getElementById('mediaOverlay');
           if (overlay) {
