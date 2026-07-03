@@ -47,7 +47,7 @@ if ($config['protected'] && empty($_SESSION['auth'])) {
   }
 }
 
-$allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm'];
+$allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm', 'zip'];
 
 function isAllowedExtension($filename) {
   global $allowedExtensions;
@@ -530,7 +530,25 @@ if ($api) {
           if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
           $zip = new ZipArchive;
           if ($zip->open($src) === TRUE) {
-            $extractTarget = dirname($src) . '/' . pathinfo($src, PATHINFO_FILENAME);
+            $folderName = pathinfo($src, PATHINFO_FILENAME);
+            $parentDir = dirname($src);
+            $extractTarget = $parentDir . '/' . $folderName;
+            
+            // Solve folder naming conflicts by keeping the extension at the end
+            if (file_exists($extractTarget)) {
+              $base = pathinfo($folderName, PATHINFO_FILENAME);
+              $ext = pathinfo($folderName, PATHINFO_EXTENSION);
+              if ($ext !== '') {
+                $counter = 1;
+                while (file_exists($parentDir . '/' . $base . '_' . $counter . '.' . $ext)) {
+                  $counter++;
+                }
+                $extractTarget = $parentDir . '/' . $base . '_' . $counter . '.' . $ext;
+              } else {
+                $extractTarget = $parentDir . '/' . generateUniqueFolderName($parentDir, $folderName);
+              }
+            }
+            
             if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
             $zip->extractTo($extractTarget);
             $zip->close();
@@ -1647,7 +1665,7 @@ if (isset($_GET['batch'])) {
         filterByType(files) {
           if (this.currentFilter === 'all') return files;
           const map = {
-            documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf'],
+            documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf', 'zip'],
             images: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
             audio: ['mp3', 'wav', 'ogg'],
             video: ['mp4', 'webm']
@@ -1803,6 +1821,7 @@ if (isset($_GET['batch'])) {
           
           let icon = isFolder ? 'folder' : 'description';
           if (!isFolder) {
+            if (item.ext === 'zip') icon = 'folder_zip';
             if (['js','json','ts'].includes(item.ext)) icon = 'javascript';
             if (['html','xml'].includes(item.ext)) icon = 'html';
             if (['css','scss'].includes(item.ext)) icon = 'css';
@@ -2411,6 +2430,10 @@ if (isset($_GET['batch'])) {
         }
 
         async openPreviewOrEditor(item) {
+          if (item.ext === 'zip') {
+            this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
+            return;
+          }
           this.currentEditFile = item.path;
           
           let qs = '?';
