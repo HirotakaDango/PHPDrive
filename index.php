@@ -685,6 +685,57 @@ if ($api) {
       }
     } else {
       switch ($action) {
+        case 'search_drive':
+          $q = strtolower($_GET['q'] ?? '');
+          $meta = getMetadata();
+          $folders = [];
+          $files = [];
+          if ($q !== '') {
+            $iter = new RecursiveIteratorIterator(
+              new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS),
+              RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($iter as $item) {
+              $pathName = $item->getPathname();
+              if (strpos($pathName, '.drive_trash_bin') !== false || strpos($pathName, '.drive_thumbnails') !== false || strpos($pathName, '.file_version') !== false) {
+                continue;
+              }
+              $filename = $item->getFilename();
+              if (stripos($filename, $q) !== false) {
+                $rel = ltrim(str_replace($baseDir, '', $pathName), '/');
+                $rel = str_replace('\\', '/', $rel);
+                $stat = stat($pathName);
+                $starred = in_array($rel, $meta['starred']);
+                if ($item->isDir()) {
+                  $folders[] = [
+                    'name' => $filename,
+                    'path' => $rel,
+                    'mtime' => $stat['mtime'],
+                    'size' => 0,
+                    'formatSize' => '-',
+                    'ext' => '',
+                    'isImage' => false,
+                    'starred' => $starred
+                  ];
+                } elseif ($item->isFile() && isAllowedExtension($filename)) {
+                  $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                  $files[] = [
+                    'name' => $filename,
+                    'path' => $rel,
+                    'mtime' => $stat['mtime'],
+                    'size' => $stat['size'],
+                    'formatSize' => formatBytes($stat['size']),
+                    'ext' => $ext,
+                    'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                    'starred' => $starred
+                  ];
+                }
+              }
+            }
+          }
+          echo json_encode(['success' => true, 'folders' => array_slice($folders, 0, 50), 'files' => array_slice($files, 0, 100)]);
+          break;
+
         case 'list':
           $meta = getMetadata();
           $files = [];
@@ -1517,6 +1568,8 @@ if (isset($_GET['batch'])) {
           
           this.selectedItems = new Set();
           this.data = { folders: [], files: [], breadcrumbs: [] };
+          this.searchResults = null;
+          this.searchDebounce = null;
           this.editor = null;
           this.currentEditFile = null;
           this.searchQuery = '';
@@ -1640,6 +1693,24 @@ if (isset($_GET['batch'])) {
           };
         }
 
+        async handleSearchInput(value) {
+          this.searchQuery = value.trim().toLowerCase();
+          if (!this.searchQuery) {
+            this.searchResults = null;
+            this.render();
+            return;
+          }
+
+          clearTimeout(this.searchDebounce);
+          this.searchDebounce = setTimeout(async () => {
+            const res = await this.fetchAPI(`search_drive&q=${encodeURIComponent(this.searchQuery)}`);
+            if (res && res.success) {
+              this.searchResults = res;
+              this.render();
+            }
+          }, 300);
+        }
+
         bindEvents() {
           document.addEventListener('click', () => {
             document.getElementById('newMenu').style.display = 'none';
@@ -1672,8 +1743,7 @@ if (isset($_GET['batch'])) {
           });
 
           document.getElementById('searchInput').addEventListener('input', (e) => {
-            this.searchQuery = e.target.value.toLowerCase();
-            this.render();
+            this.handleSearchInput(e.target.value);
           });
 
           document.addEventListener('keydown', (e) => {
@@ -1753,6 +1823,11 @@ if (isset($_GET['batch'])) {
 
         navigate(path, pushState = true) {
           this.currentPath = path;
+          this.searchQuery = '';
+          this.searchResults = null;
+          const searchInp = document.getElementById('searchInput');
+          if (searchInp) searchInp.value = '';
+          
           if (pushState) {
             const url = path ? `?path=${encodeURIComponent(path).replace(/%2F/g, '/')}` : window.location.pathname;
             window.history.pushState({ path }, '', url);
@@ -1928,9 +2003,17 @@ if (isset($_GET['batch'])) {
           this.visibleFoldersCount = 25;
           this.visibleFilesCount = 25;
 
+          let sourceFolders = this.data.folders;
+          let sourceFiles = this.data.files;
+
+          if (this.searchQuery && this.searchResults) {
+            sourceFolders = this.searchResults.folders || [];
+            sourceFiles = this.searchResults.files || [];
+          }
+
           const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-          this.filteredFolders = this.sortData(this.data.folders.filter(filterFn));
-          this.filteredFiles = this.sortData(this.filterByType(this.data.files.filter(filterFn)));
+          this.filteredFolders = this.sortData(sourceFolders.filter(filterFn));
+          this.filteredFiles = this.sortData(this.filterByType(sourceFiles.filter(filterFn)));
 
           // Update dynamic title with path and files indicator
           const totalItems = this.filteredFolders.length + this.filteredFiles.length;
