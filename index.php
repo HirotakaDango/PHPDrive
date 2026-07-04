@@ -263,7 +263,6 @@ if ($api) {
     
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
-    $isVideo = in_array($ext, ['mp4', 'webm']);
     
     if ($ext === 'svg') {
       header('Content-Type: image/svg+xml');
@@ -271,14 +270,14 @@ if ($api) {
       exit;
     }
     
-    if ($isImage || $isVideo) {
+    if ($isImage) {
       $thumbDir = $baseDir . '/.drive_thumbnails';
       if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
       $hash = md5($full . filemtime($full));
       $thumbPath = $thumbDir . '/' . $hash . '.webp';
       
       if (!file_exists($thumbPath)) {
-        if ($isImage && function_exists('imagecreatefromstring')) {
+        if (function_exists('imagecreatefromstring')) {
           @ini_set('memory_limit', '256M'); // Prevent crash on large photos
           $content = @file_get_contents($full);
           if ($content) {
@@ -301,9 +300,6 @@ if ($api) {
               imagedestroy($tmp);
             }
           }
-        } elseif ($isVideo && function_exists('exec')) {
-          // Uses FFmpeg to extract frame 1 as a lightweight WebP 
-          @exec("ffmpeg -y -i " . escapeshellarg($full) . " -ss 00:00:01 -vframes 1 -vf scale=320:-1 -c:v libwebp -q:v 50 " . escapeshellarg($thumbPath) . " 2>/dev/null");
         }
       }
       
@@ -362,19 +358,48 @@ if ($api) {
           if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
           $uploaded = 0;
           $paths = $_POST['paths'] ?? [];
+          $chunk = isset($_POST['chunk']) ? (int)$_POST['chunk'] : 0;
+          $chunks = isset($_POST['chunks']) ? (int)$_POST['chunks'] : 1;
+          $fileId = $_POST['file_id'] ?? 'unknown';
+
           foreach ($_FILES['files']['name'] as $i => $name) {
             if (isAllowedExtension($name)) {
               if (!empty($paths[$i])) {
-                // Sanitize path traversals and rebuild directory tree structure recursively
                 $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
                 $dest = $absPath . '/' . $relPathClean;
                 $targetDir = dirname($dest);
                 if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
               } else {
                 $dest = $absPath . '/' . $name;
-                if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+                $targetDir = $absPath;
               }
-              if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) $uploaded++;
+
+              if ($chunks > 1) {
+                $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
+                $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
+                if ($out) {
+                  $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
+                  if ($in) {
+                    while ($buff = fread($in, 8192)) fwrite($out, $buff);
+                    fclose($in);
+                  }
+                  fclose($out);
+                }
+                if ($chunk == $chunks - 1) {
+                  if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
+                  rename($tempDest, $dest);
+                  $uploaded++;
+                  $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                  if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
+                }
+              } else {
+                if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
+                if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                  $uploaded++;
+                  $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                  if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
+                }
+              }
             }
           }
           echo json_encode(['success' => true, 'uploaded' => $uploaded]);
@@ -673,21 +698,30 @@ if ($api) {
         case 'recents':
           $meta = getMetadata();
           $recentFiles = [];
-          $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS));
+          
+          // Optimized Directory Scanner: Skip scanning massive or irrelevant system directories
+          $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS);
+          $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
+            $exclude = ['getid3', '.drive_trash_bin', '.drive_thumbnails', '.git', 'uploads', 'covers', 'brain'];
+            if ($current->isDir() && in_array($current->getFilename(), $exclude)) {
+              return false;
+            }
+            return true;
+          });
+          
+          $iter = new RecursiveIteratorIterator($filter);
           foreach ($iter as $file) {
             if ($file->isFile() && isAllowedExtension($file->getFilename())) {
               $path = $file->getPathname();
-              if (strpos($path, '.drive_trash_bin') === false && strpos($path, '.drive_thumbnails') === false && strpos($path, '.drive_metadata.json') === false) {
-                $recentFiles[] = [
-                  'name' => $file->getFilename(),
-                  'path' => ltrim(str_replace($baseDir, '', $path), '/'),
-                  'mtime' => $file->getMTime(),
-                  'size' => $file->getSize(),
-                  'formatSize' => formatBytes($file->getSize()),
-                  'ext' => strtolower($file->getExtension()),
-                  'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
-                ];
-              }
+              $recentFiles[] = [
+                'name' => $file->getFilename(),
+                'path' => ltrim(str_replace($baseDir, '', $path), '/'),
+                'mtime' => $file->getMTime(),
+                'size' => $file->getSize(),
+                'formatSize' => formatBytes($file->getSize()),
+                'ext' => strtolower($file->getExtension()),
+                'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+              ];
             }
           }
           usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
@@ -1888,31 +1922,21 @@ if (isset($_GET['batch'])) {
           const nameWithHighlight = this.highlightMatch(item.name);
 
           if (this.viewMode === 'grid') {
-            if (isFolder) {
-              el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-              el.innerHTML = `
-                ${checkboxHtml}
-                <div class="item-icon folder-icon"><span class="material-symbols-rounded">folder</span></div>
-                <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                ${starHtml}
-              `;
-            } else {
-              el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-              let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
-              if (item.isImage || ['mp4', 'webm'].includes(item.ext)) {
-                const streamUrl = `?api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-                previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
-              }
-              el.innerHTML = `
-                ${checkboxHtml}
-                <div class="file-preview">${previewHtml}</div>
-                <div class="file-info-bar">
-                  <div class="item-icon"><span class="material-symbols-rounded">${icon}</span></div>
-                  <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                </div>
-                ${starHtml}
-              `;
+            el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
+            let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
+            if (!isFolder && item.isImage) {
+              const streamUrl = `?api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+              previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
             }
+            el.innerHTML = `
+              ${checkboxHtml}
+              <div class="file-preview">${previewHtml}</div>
+              <div class="file-info-bar">
+                <div class="item-icon ${isFolder ? 'folder-icon' : ''}"><span class="material-symbols-rounded">${icon}</span></div>
+                <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+              </div>
+              ${starHtml}
+            `;
           } else {
             el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
             const date = new Date(item.mtime * 1000).toLocaleDateString();
@@ -2921,49 +2945,78 @@ if (isset($_GET['batch'])) {
           this.updateItemUI(next);
           this.updateHeader();
 
-          const formData = new FormData();
-          formData.append('action', 'upload');
-          formData.append('files[]', next.file);
-          formData.append('paths[]', next.path);
+          const uploadNextChunk = (chunkIndex) => {
+            const chunkSize = 5 * 1024 * 1024; // Slice into 5MB chunks
+            const totalChunks = Math.ceil(next.file.size / chunkSize) || 1;
+            const start = chunkIndex * chunkSize;
+            const end = Math.min(start + chunkSize, next.file.size);
+            const chunkBlob = next.file.slice(start, end);
 
-          const xhr = new XMLHttpRequest();
-          next.xhr = xhr;
-          this.activeXhr = xhr;
+            const formData = new FormData();
+            formData.append('action', 'upload');
+            formData.append('files[]', chunkBlob, next.file.name);
+            formData.append('paths[]', next.path);
+            formData.append('chunk', chunkIndex);
+            formData.append('chunks', totalChunks);
+            formData.append('file_id', next.id);
 
-          xhr.open('POST', `?api=true&action=upload&path=${encodeURIComponent(this.manager.currentPath)}`);
-          
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              next.progress = Math.round((e.loaded / e.total) * 100);
-              this.updateItemUI(next);
-            }
-          };
+            const xhr = new XMLHttpRequest();
+            next.xhr = xhr;
+            this.activeXhr = xhr;
 
-          xhr.onload = () => {
-            this.activeXhr = null;
-            try {
-              const res = JSON.parse(xhr.responseText);
-              if (res.success && res.uploaded > 0) {
-                next.status = 'success';
-                next.progress = 100;
-              } else {
-                next.status = 'failed';
+            xhr.open('POST', `?api=true&action=upload&path=${encodeURIComponent(this.manager.currentPath)}`);
+            
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                const chunkProgress = e.loaded / e.total;
+                const overallProgress = ((chunkIndex + chunkProgress) / totalChunks) * 100;
+                next.progress = Math.round(overallProgress);
+                this.updateItemUI(next);
               }
-            } catch (err) {
+            };
+
+            xhr.onload = () => {
+              if (xhr.status === 200) {
+                try {
+                  const res = JSON.parse(xhr.responseText);
+                  if (res.success) {
+                    if (chunkIndex < totalChunks - 1) {
+                      uploadNextChunk(chunkIndex + 1); // Blast the next chunk
+                    } else {
+                      this.activeXhr = null;
+                      next.status = 'success';
+                      next.progress = 100;
+                      this.updateItemUI(next);
+                      this.processNext();
+                    }
+                  } else {
+                    throw new Error("Server rejected chunk");
+                  }
+                } catch (err) {
+                  this.activeXhr = null;
+                  next.status = 'failed';
+                  this.updateItemUI(next);
+                  this.processNext();
+                }
+              } else {
+                this.activeXhr = null;
+                next.status = 'failed';
+                this.updateItemUI(next);
+                this.processNext();
+              }
+            };
+
+            xhr.onerror = () => {
+              this.activeXhr = null;
               next.status = 'failed';
-            }
-            this.updateItemUI(next);
-            this.processNext();
+              this.updateItemUI(next);
+              this.processNext();
+            };
+
+            xhr.send(formData);
           };
 
-          xhr.onerror = () => {
-            this.activeXhr = null;
-            next.status = 'failed';
-            this.updateItemUI(next);
-            this.processNext();
-          };
-
-          xhr.send(formData);
+          uploadNextChunk(0);
         }
 
         cancel(id) {
