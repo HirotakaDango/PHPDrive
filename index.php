@@ -50,8 +50,17 @@ if ($config['protected'] && empty($_SESSION['auth'])) {
 $allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm', 'zip'];
 
 function isAllowedExtension($filename) {
-  global $allowedExtensions;
-  return in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), $allowedExtensions);
+  return true; // All file extensions allowed
+}
+
+function save_file_version($filepath) {
+  global $baseDir;
+  if (!file_exists($filepath) || is_dir($filepath)) return;
+  $filename = basename($filepath);
+  $verDir = $baseDir . '/.file_version/' . $filename;
+  if (!is_dir($verDir)) @mkdir($verDir, 0755, true);
+  $date = date('Y-m-d_H-i-s');
+  @copy($filepath, $verDir . '/' . $filename . '_' . $date);
 }
 
 function generateUniqueFileName($dir, $filename) {
@@ -339,9 +348,8 @@ if ($api) {
       switch ($postAction) {
         case 'add_file':
           $name = $input['name'] ?? '';
-          if (!isAllowedExtension($name)) throw new Exception('Extension not allowed');
           $full = $absPath . '/' . $name;
-          if (file_exists($full)) $full = $absPath . '/' . generateUniqueFileName($absPath, $name);
+          if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
           file_put_contents($full, '');
           echo json_encode(['success' => true]);
           break;
@@ -349,7 +357,7 @@ if ($api) {
         case 'add_folder':
           $name = $input['name'] ?? '';
           $full = $absPath . '/' . $name;
-          if (file_exists($full)) $full = $absPath . '/' . generateUniqueFolderName($absPath, $name);
+          if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
           mkdir($full);
           echo json_encode(['success' => true]);
           break;
@@ -361,48 +369,138 @@ if ($api) {
           $chunk = isset($_POST['chunk']) ? (int)$_POST['chunk'] : 0;
           $chunks = isset($_POST['chunks']) ? (int)$_POST['chunks'] : 1;
           $fileId = $_POST['file_id'] ?? 'unknown';
+          $override = !empty($_POST['override']);
 
           foreach ($_FILES['files']['name'] as $i => $name) {
-            if (isAllowedExtension($name)) {
-              if (!empty($paths[$i])) {
-                $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
-                $dest = $absPath . '/' . $relPathClean;
-                $targetDir = dirname($dest);
-                if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
-              } else {
-                $dest = $absPath . '/' . $name;
-                $targetDir = $absPath;
-              }
+            $relPathClean = !empty($paths[$i]) ? ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/') : $name;
+            $dest = $absPath . '/' . $relPathClean;
+            $targetDir = dirname($dest);
+            if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
 
-              if ($chunks > 1) {
-                $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
-                $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
-                if ($out) {
-                  $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
-                  if ($in) {
-                    while ($buff = fread($in, 8192)) fwrite($out, $buff);
-                    fclose($in);
-                  }
-                  fclose($out);
+            if ($chunk === 0 && file_exists($dest) && !$override) {
+              echo json_encode(['success' => false, 'error' => 'CONFLICT|' . basename($dest)]);
+              exit;
+            }
+            if ($chunk === 0 && file_exists($dest) && $override) {
+              save_file_version($dest);
+            }
+
+            if ($chunks > 1) {
+              $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
+              $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
+              if ($out) {
+                $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
+                if ($in) {
+                  while ($buff = fread($in, 8192)) fwrite($out, $buff);
+                  fclose($in);
                 }
-                if ($chunk == $chunks - 1) {
-                  if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
-                  rename($tempDest, $dest);
-                  $uploaded++;
-                  $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                  if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
-                }
-              } else {
-                if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
-                if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
-                  $uploaded++;
-                  $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                  if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
-                }
+                fclose($out);
+              }
+              if ($chunk == $chunks - 1) {
+                rename($tempDest, $dest);
+                $uploaded++;
+              }
+            } else {
+              if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                $uploaded++;
               }
             }
           }
           echo json_encode(['success' => true, 'uploaded' => $uploaded]);
+          break;
+
+        case 'upload_url':
+          $url = $input['url'] ?? '';
+          $override = !empty($input['override']);
+          $name = basename(parse_url($url, PHP_URL_PATH));
+          if (!$name) $name = 'downloaded_file_' . time();
+          $target = $absPath . '/' . $name;
+          
+          if (file_exists($target) && !$override) throw new Exception('CONFLICT|' . $name);
+          if (file_exists($target) && $override) save_file_version($target);
+          file_put_contents($target, file_get_contents($url));
+          echo json_encode(['success' => true]);
+          break;
+
+        case 'zip_items':
+          $items = $input['items'] ?? [];
+          if (empty($items)) throw new Exception('No items selected');
+          $zipName = (count($items) === 1) ? basename($items[0]) . '.zip' : 'Archive_' . date('Ymd_His') . '.zip';
+          $target = $absPath . '/' . $zipName;
+          
+          if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . $zipName);
+          if (file_exists($target)) save_file_version($target);
+          
+          $zip = new ZipArchive();
+          if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
+            foreach ($items as $item) {
+              $src = $baseDir . '/' . $item;
+              if (is_file($src)) $zip->addFile($src, basename($src));
+              elseif (is_dir($src)) {
+                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS));
+                foreach ($iter as $f) {
+                  if ($f->isFile()) $zip->addFile($f->getPathname(), basename($src) . '/' . str_replace($src . '/', '', $f->getPathname()));
+                }
+              }
+            }
+            $zip->close();
+          }
+          echo json_encode(['success' => true]);
+          break;
+
+        case 'encrypt_file':
+        case 'decrypt_file':
+          $file = $input['file'] ?? '';
+          $src = $baseDir . '/' . $file;
+          if (!file_exists($src) || is_dir($src)) throw new Exception('Invalid file');
+          
+          global $config;
+          $secret_key = substr(hash('sha256', $config['password']), 0, 32);
+          $content = file_get_contents($src);
+          
+          if ($postAction === 'encrypt_file') {
+            $target = $src . '.enc';
+            if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
+            $iv = random_bytes(16);
+            $encrypted = openssl_encrypt($content, 'aes-256-cbc', $secret_key, 0, $iv);
+            file_put_contents($target, base64_encode($iv) . ':' . $encrypted);
+            unlink($src);
+          } else {
+            if (substr($src, -4) !== '.enc') throw new Exception('Not an encrypted file');
+            $target = substr($src, 0, -4);
+            if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
+            $parts = explode(':', $content, 2);
+            $iv = base64_decode($parts[0]);
+            $decrypted = openssl_decrypt($parts[1], 'aes-256-cbc', $secret_key, 0, $iv);
+            if ($decrypted === false) throw new Exception('Decryption failed. Incorrect key or corrupted file.');
+            file_put_contents($target, $decrypted);
+            unlink($src);
+          }
+          echo json_encode(['success' => true]);
+          break;
+
+        case 'get_versions':
+          $file = $input['file'] ?? '';
+          $verDir = $baseDir . '/.file_version/' . basename($file);
+          $versions = [];
+          if (is_dir($verDir)) {
+            foreach (array_diff(scandir($verDir), ['.', '..']) as $v) {
+              $versions[] = ['name' => $v, 'mtime' => filemtime($verDir . '/' . $v), 'size' => formatBytes(filesize($verDir . '/' . $v))];
+            }
+            usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+          }
+          echo json_encode(['success' => true, 'versions' => $versions]);
+          break;
+
+        case 'restore_version':
+          $file = $input['file'] ?? '';
+          $version_name = $input['version_name'] ?? '';
+          $src = $baseDir . '/.file_version/' . basename($file) . '/' . $version_name;
+          $dest = $baseDir . '/' . $file;
+          if (!file_exists($src)) throw new Exception('Version not found');
+          save_file_version($dest); // Backup current state before restoring
+          copy($src, $dest);
+          echo json_encode(['success' => true]);
           break;
 
         case 'trash':
@@ -441,9 +539,8 @@ if ($api) {
               $targetDir = $baseDir . '/' . $info['original_parent'];
               if (!is_dir($targetDir)) $targetDir = $baseDir;
               $dest = $targetDir . '/' . $info['original_name'];
-              if (file_exists($dest)) {
-                $dest = generateUniqueFileName($targetDir, $info['original_name']);
-              }
+              if (file_exists($dest) && empty($input['override'])) throw new Exception('CONFLICT|' . $info['original_name']);
+              if (file_exists($dest) && !empty($input['override'])) save_file_version($dest);
               if (rename($trashBin . '/' . $uniq, $dest)) {
                 unset($meta['trash'][$uniq]);
               }
@@ -484,8 +581,8 @@ if ($api) {
           $oldFull = $baseDir . '/' . $old;
           $newFull = dirname($oldFull) . '/' . $new;
           if (!isValidPath($baseDir, $oldFull) || !file_exists($oldFull)) throw new Exception('Invalid source');
-          if (is_file($oldFull) && !isAllowedExtension($new)) throw new Exception('Extension not allowed');
-          if (file_exists($newFull)) throw new Exception('Target exists');
+          if (file_exists($newFull) && empty($input['override'])) throw new Exception('CONFLICT|' . $new);
+          if (file_exists($newFull) && !empty($input['override'])) save_file_version($newFull);
           rename($oldFull, $newFull);
           echo json_encode(['success' => true]);
           break;
@@ -494,7 +591,8 @@ if ($api) {
           $file = $input['file'] ?? '';
           $content = $input['content'] ?? '';
           $full = $baseDir . '/' . $file;
-          if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
+          if (!isValidPath($baseDir, $full)) throw new Exception('Invalid file');
+          save_file_version($full); // Track file version before writing
           file_put_contents($full, $content);
           echo json_encode(['success' => true]);
           break;
@@ -517,15 +615,22 @@ if ($api) {
         case 'move_items':
           $items = $input['items'] ?? [];
           $target = $input['target'] ?? '';
+          $override = !empty($input['override']);
           $targetDir = rtrim($baseDir . '/' . $target, '/');
           if (!isValidPath($baseDir, $targetDir)) throw new Exception('Invalid target');
+          
           foreach ($items as $item) {
             $src = $baseDir . '/' . $item;
             if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
             $dest = $targetDir . '/' . basename($item);
-            if (file_exists($dest)) {
-              $dest = is_dir($src) ? $targetDir . '/' . generateUniqueFolderName($targetDir, basename($item)) : $targetDir . '/' . generateUniqueFileName($targetDir, basename($item));
+            
+            if (file_exists($dest) && !$override) {
+              throw new Exception('CONFLICT|' . basename($item));
             }
+            if (file_exists($dest) && $override) {
+              save_file_version($dest);
+            }
+            
             if ($postAction === 'move_items') {
               if ($src !== $dest) rename($src, $dest);
             } else {
@@ -533,21 +638,6 @@ if ($api) {
             }
           }
           echo json_encode(['success' => true]);
-          break;
-
-        case 'move':
-          $item = $input['item'] ?? '';
-          $targetFolder = $input['target'] ?? '';
-          $src = $baseDir . '/' . $item;
-          $targetDir = rtrim($baseDir . '/' . $targetFolder, '/');
-          $dest = $targetDir . '/' . basename($item);
-          if (!isValidPath($baseDir, $src) || !isValidPath($baseDir, $targetDir)) throw new Exception('Invalid route path');
-          if (file_exists($dest)) throw new Exception('Item already exists in destination');
-          if (rename($src, $dest)) {
-            echo json_encode(['success' => true]);
-          } else {
-            throw new Exception('Failed to move item');
-          }
           break;
 
         case 'create_share':
@@ -572,22 +662,9 @@ if ($api) {
             $parentDir = dirname($src);
             $extractTarget = $parentDir . '/' . $folderName;
             
-            // Solve folder naming conflicts by keeping the extension at the end
-            if (file_exists($extractTarget)) {
-              $base = pathinfo($folderName, PATHINFO_FILENAME);
-              $ext = pathinfo($folderName, PATHINFO_EXTENSION);
-              if ($ext !== '') {
-                $counter = 1;
-                while (file_exists($parentDir . '/' . $base . '_' . $counter . '.' . $ext)) {
-                  $counter++;
-                }
-                $extractTarget = $parentDir . '/' . $base . '_' . $counter . '.' . $ext;
-              } else {
-                $extractTarget = $parentDir . '/' . generateUniqueFolderName($parentDir, $folderName);
-              }
-            }
-            
+            if (file_exists($extractTarget) && empty($input['override'])) throw new Exception('CONFLICT|' . $folderName);
             if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
+            
             $zip->extractTo($extractTarget);
             $zip->close();
             echo json_encode(['success' => true]);
@@ -669,6 +746,35 @@ if ($api) {
             ];
           }
           echo json_encode(['success' => true, 'trash' => $trashList]);
+          break;
+
+        case 'list_history':
+          $historyFiles = [];
+          $verDir = $baseDir . '/.file_version';
+          if (is_dir($verDir)) {
+            $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($verDir, FilesystemIterator::SKIP_DOTS));
+            foreach ($iter as $file) {
+              if ($file->isFile()) {
+                $origName = basename(dirname($file->getPathname()));
+                $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                $historyFiles[] = [
+                  'name' => $file->getFilename() . ' (Version of ' . $origName . ')',
+                  'path' => ltrim(str_replace($baseDir, '', $file->getPathname()), '/'),
+                  'mtime' => $file->getMTime(),
+                  'size' => $file->getSize(),
+                  'formatSize' => formatBytes($file->getSize()),
+                  'ext' => $ext,
+                  'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                  'starred' => false,
+                  'is_version' => true,
+                  'original_file' => $origName,
+                  'version_name' => $file->getFilename()
+                ];
+              }
+            }
+            usort($historyFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+          }
+          echo json_encode(['success' => true, 'history' => $historyFiles]);
           break;
 
         case 'list_starred':
@@ -1185,6 +1291,9 @@ if (isset($_GET['batch'])) {
           <a class="nav-item" id="navStarred" onclick="app.setViewMode('starred')">
             <span class="material-symbols-rounded">star</span> Starred
           </a>
+          <a class="nav-item" id="navHistory" onclick="app.setViewMode('history')">
+            <span class="material-symbols-rounded">history</span> History
+          </a>
           <a class="nav-item" id="navTrash" onclick="app.setViewMode('trash')">
             <span class="material-symbols-rounded">delete</span> Trash
           </a>
@@ -1256,6 +1365,7 @@ if (isset($_GET['batch'])) {
       <div class="menu-divider"></div>
       <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
       <div class="menu-item" onclick="document.getElementById('folderUploadInput').click()"><span class="material-symbols-rounded">drive_folder_upload</span>Folder upload</div>
+      <div class="menu-item" onclick="app.showModal('uploadUrl')"><span class="material-symbols-rounded">link</span>Upload via URL</div>
       <input type="file" id="fileUploadInput" multiple class="hidden" onchange="app.handleFilesSelect(event)">
       <input type="file" id="folderUploadInput" webkitdirectory directory multiple class="hidden" onchange="app.handleFolderSelect(event)">
     </div>
@@ -1604,7 +1714,7 @@ if (isset($_GET['batch'])) {
           }
         }
 
-        async fetchAPI(action, method = 'GET', body = null) {
+        async fetchAPI(action, method = 'GET', body = null, isOverrideRetry = false) {
           const url = `?api=true&action=${action}&path=${encodeURIComponent(this.currentPath)}`;
           const options = { method };
           if (body) {
@@ -1620,7 +1730,20 @@ if (isset($_GET['batch'])) {
             const text = await res.text();
             let data;
             try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid response from server'); }
-            if (!data.success) throw new Error(data.error || 'Unknown error');
+            
+            if (!data.success) {
+              if (data.error && data.error.startsWith('CONFLICT|')) {
+                const conflictFilename = data.error.split('|')[1];
+                if (confirm(`The file "${conflictFilename}" already exists. Do you want to overwrite it and save a version history?`)) {
+                  if (body instanceof FormData) body.append('override', '1');
+                  else body.override = true;
+                  return await this.fetchAPI(action, method, body, true);
+                } else {
+                  return null; // Cancelled
+                }
+              }
+              throw new Error(data.error || 'Unknown error');
+            }
             return data;
           } catch (err) {
             this.showToast(err.message);
@@ -1644,10 +1767,12 @@ if (isset($_GET['batch'])) {
           
           const navHome = document.getElementById('navHome');
           const navStarred = document.getElementById('navStarred');
+          const navHistory = document.getElementById('navHistory');
           const navTrash = document.getElementById('navTrash');
           
           if (navHome) navHome.classList.toggle('active', mode === 'home');
           if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
+          if (navHistory) navHistory.classList.toggle('active', mode === 'history');
           if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
           
           document.getElementById('chipsContainer').style.display = mode === 'home' ? 'flex' : 'none';
@@ -1697,6 +1822,12 @@ if (isset($_GET['batch'])) {
             const data = await this.fetchAPI('list_starred');
             if (data) {
               this.data = { folders: data.starred.filter(i => i.isDir), files: data.starred.filter(i => !i.isDir), breadcrumbs: [] };
+              this.render();
+            }
+          } else if (this.currentViewMode === 'history') {
+            const data = await this.fetchAPI('list_history');
+            if (data) {
+              this.data = { folders: [], files: data.history, breadcrumbs: [] };
               this.render();
             }
           } else if (this.currentViewMode === 'trash') {
@@ -1876,7 +2007,7 @@ if (isset($_GET['batch'])) {
           
           const root = document.createElement('div');
           root.className = 'breadcrumb-item';
-          root.textContent = this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : 'Drive');
+          root.textContent = this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'history' ? 'File Versions History' : 'Drive'));
           root.onclick = () => this.navigate('');
           container.appendChild(root);
 
@@ -2267,6 +2398,11 @@ if (isset($_GET['batch'])) {
             if (isFolder) {
               addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
               addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+              addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
+            } else if (item.is_version) {
+              addMenuItem('history', 'Rollback to this Version', () => this.restoreVersion(item.original_file, item.version_name));
+              addMenuItem('open_in_new', 'Preview Version', () => window.open(`?api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
+              addMenuItem('download', 'Download Version', () => window.location.href = `?download=${encodeURIComponent(item.path)}`);
             } else {
               addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
               addMenuItem('open_in_new', 'Open in a new tab', () => window.open(`?api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
@@ -2274,18 +2410,26 @@ if (isset($_GET['batch'])) {
               addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
               if (item.ext === 'zip') {
                 addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
+              } else if (item.ext === 'enc') {
+                addMenuItem('lock_open', 'Decrypt File', () => this.decryptFile(item.path));
+              } else {
+                addMenuItem('lock', 'Encrypt File', () => this.encryptFile(item.path));
               }
+              addMenuItem('history', 'Version History', () => this.showVersions(item.path));
             }
-            addMenuItem('link', 'Copy Direct URL', () => {
-              let qs = '?';
-              if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}`;
-              if (!isFolder) qs += (qs === '?' ? '' : '&') + `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-              if (qs === '?') qs = '';
-              const url = window.location.origin + window.location.pathname + qs;
-              navigator.clipboard.writeText(url);
-              this.showToast('URL copied to clipboard!');
-            });
-            addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
+            
+            if (!item.is_version) {
+              addMenuItem('link', 'Copy Direct URL', () => {
+                let qs = '?';
+                if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}`;
+                if (!isFolder) qs += (qs === '?' ? '' : '&') + `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+                if (qs === '?') qs = '';
+                const url = window.location.origin + window.location.pathname + qs;
+                navigator.clipboard.writeText(url);
+                this.showToast('URL copied to clipboard!');
+              });
+              addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
+            }
             addMenuItem('info', 'Info', () => {
               this.isPropertiesOpen = false;
               this.toggleProperties();
@@ -2293,11 +2437,14 @@ if (isset($_GET['batch'])) {
             const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
           } else {
             addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+            addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
             const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
           }
           
-          addMenuItem('content_copy', 'Copy', () => this.copyToClipboard('copy'));
-          addMenuItem('content_cut', 'Cut (Move)', () => this.copyToClipboard('cut'));
+          if (!item.is_version) {
+            addMenuItem('content_copy', 'Copy', () => this.copyToClipboard('copy'));
+            addMenuItem('content_cut', 'Cut (Move)', () => this.copyToClipboard('cut'));
+          }
           addMenuItem('delete', 'Move to Trash', () => this.deleteSelected());
           
           menu.style.display = 'flex';
@@ -2396,6 +2543,10 @@ if (isset($_GET['batch'])) {
             } else if (action === 'addFile') {
               const res = await this.fetchAPI('add_file', 'POST', { action: 'add_file', name: val });
               if (res) { this.showToast('File created'); this.loadDirectory(this.currentPath); }
+            } else if (action === 'uploadUrl') {
+              this.showToast('Downloading from URL...');
+              const res = await this.fetchAPI('upload_url', 'POST', { action: 'upload_url', url: val });
+              if (res) { this.showToast('Downloaded successfully'); this.loadDirectory(this.currentPath); }
             } else if (action === 'rename') {
               const oldName = oldPath.split('/').pop();
               const extOld = oldName.split('.').pop();
@@ -2419,10 +2570,97 @@ if (isset($_GET['batch'])) {
             title.textContent = 'New file';
             input.placeholder = 'File name (e.g., script.js)';
             submit.textContent = 'Create';
+          } else if (action === 'uploadUrl') {
+            title.textContent = 'Upload from URL';
+            input.placeholder = 'https://example.com/file.png';
+            submit.textContent = 'Download';
           } else if (action === 'rename') {
             title.textContent = 'Rename';
             input.value = oldPath.split('/').pop();
             submit.textContent = 'OK';
+          }
+        }
+
+        async archiveItems() {
+          const items = Array.from(this.selectedItems);
+          if (items.length === 0) return;
+          this.showToast('Creating Zip Archive...');
+          const res = await this.fetchAPI('zip_items', 'POST', { action: 'zip_items', items });
+          if (res) {
+            this.showToast('Archive created successfully');
+            this.clearSelection(null, true);
+            this.loadDirectory(this.currentPath);
+          }
+        }
+
+        async encryptFile(path) {
+          this.showToast('Encrypting securely (AES-256)...');
+          const res = await this.fetchAPI('encrypt_file', 'POST', { action: 'encrypt_file', file: path });
+          if (res) {
+            this.showToast('File encrypted successfully!');
+            this.loadDirectory(this.currentPath);
+          }
+        }
+
+        async decryptFile(path) {
+          this.showToast('Decrypting file...');
+          const res = await this.fetchAPI('decrypt_file', 'POST', { action: 'decrypt_file', file: path });
+          if (res) {
+            this.showToast('File decrypted successfully!');
+            this.loadDirectory(this.currentPath);
+          }
+        }
+
+        async showVersions(path) {
+          const res = await this.fetchAPI('get_versions', 'POST', { action: 'get_versions', file: path });
+          if (res && res.versions.length > 0) {
+            const overlay = document.getElementById('modalOverlay');
+            const title = document.getElementById('modalTitle');
+            title.textContent = 'Version History';
+            
+            let html = `<div class="versions-list" style="max-height: 250px; overflow-y: auto; background: var(--theme-surface-container-high); border-radius: 8px; padding: 4px; width: 100%;">`;
+            res.versions.forEach(v => {
+              const d = new Date(v.mtime * 1000).toLocaleString();
+              html += `
+                <div class="version-item" style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant);">
+                  <div style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 12px;">
+                    <div style="font-weight:600;font-size:14px;color:var(--theme-on-surface)">${d}</div>
+                    <div style="font-size:12px;color:var(--theme-on-surface-variant)">Size: ${v.size}</div>
+                  </div>
+                  <button class="btn btn-filled" style="height:32px;font-size:12px;padding:0 12px;" onclick="app.restoreVersion('${path}', '${v.name}')">Restore</button>
+                </div>`;
+            });
+            html += `</div>`;
+            
+            const input = document.getElementById('modalInput');
+            input.style.display = 'none';
+            input.insertAdjacentHTML('afterend', `<div id="versionsContainer">${html}</div>`);
+            
+            document.getElementById('modalSubmit').style.display = 'none';
+            overlay.style.display = 'flex';
+            
+            const oldClose = this.closeModal;
+            this.closeModal = () => {
+              const c = document.getElementById('versionsContainer');
+              if (c) c.remove();
+              input.style.display = 'block';
+              document.getElementById('modalSubmit').style.display = 'inline-flex';
+              oldClose.call(this);
+            };
+          } else {
+            this.showToast('No version history found for this file.');
+          }
+        }
+
+        async restoreVersion(path, versionName) {
+          if (confirm('Restore this older version? The current file will be backed up.')) {
+            this.closeModal();
+            this.showToast('Restoring version...');
+            const res = await this.fetchAPI('restore_version', 'POST', { action: 'restore_version', file: path, version_name: versionName });
+            if (res) {
+              this.showToast('Version restored successfully!');
+              this.loadDirectory(this.currentPath);
+            }
           }
         }
 
