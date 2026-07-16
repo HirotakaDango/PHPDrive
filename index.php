@@ -1225,8 +1225,9 @@ if (isset($_GET['batch'])) {
       .editor-header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
       .editor-title { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .editor-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; position: relative; }
-      .CodeMirror { flex: 1; height: 100% !important; font-family: monospace; font-size: 14px; }
+      .CodeMirror { position: absolute !important; top: 0; left: 0; right: 0; bottom: 0; height: 100% !important; font-family: monospace; font-size: 14px; }
       .CodeMirror-scroll { padding-bottom: 120px !important; }
+      .CodeMirror-wrap .CodeMirror-scroll { overflow-x: hidden !important; }
       
       .mobile-editor-container { flex: 1; display: none; flex-direction: column; background: var(--theme-surface); height: 100%; }
       .mobile-textarea { flex: 1; border: none; outline: none; background: transparent; padding: 16px 16px 120px 16px; font-family: monospace; font-size: 16px; color: var(--theme-on-surface); resize: none; width: 100%; line-height: 1.5; height: 100%; }
@@ -1501,7 +1502,7 @@ if (isset($_GET['batch'])) {
         </div>
       </div>
       <div class="editor-body">
-        <div id="desktopEditorContainer" style="flex: 1; display: flex; flex-direction: column;">
+        <div id="desktopEditorContainer" style="flex: 1; display: none; position: relative; min-height: 0;">
           <textarea id="editorTextarea"></textarea>
         </div>
         <div class="mobile-editor-container" id="mobileEditorContainer">
@@ -2017,7 +2018,8 @@ if (isset($_GET['batch'])) {
 
           // Update dynamic title with path and files indicator
           const totalItems = this.filteredFolders.length + this.filteredFiles.length;
-          document.title = (this.currentPath ? `/${this.currentPath}` : 'Drive') + ` (${totalItems} items) - PHPDrive`;
+          const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
+          document.title = `${folderName} (${totalItems} items) - PHPDrive`;
 
           document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
           document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
@@ -2883,6 +2885,12 @@ if (isset($_GET['batch'])) {
           }
         }
 
+        restoreDocumentTitle() {
+          const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
+          const totalItems = this.filteredFolders.length + this.filteredFiles.length;
+          document.title = `${folderName} (${totalItems} items) - PHPDrive`;
+        }
+
         async openPreviewOrEditor(item) {
           if (item.ext === 'zip') {
             this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
@@ -2896,6 +2904,7 @@ if (isset($_GET['batch'])) {
           window.history.pushState({}, '', qs);
           
           const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
+          document.title = `${item.name} - PHPDrive`;
 
           if (item.isImage) {
             const imageOverlay = document.getElementById('imageOverlay');
@@ -2944,6 +2953,7 @@ if (isset($_GET['batch'])) {
             const mobileContainer = document.getElementById('mobileEditorContainer');
             
             document.getElementById('editorTitle').textContent = item.name;
+            document.title = `${item.name} - Editor - PHPDrive`;
             overlay.style.display = 'flex';
             
             desktopContainer.style.display = 'none';
@@ -2960,12 +2970,20 @@ if (isset($_GET['batch'])) {
                 const textEl = document.getElementById('mobileTextarea');
                 textEl.value = res.content;
               } else {
-                desktopContainer.style.display = 'flex';
+                desktopContainer.style.display = 'block';
                 let mode = 'text/plain';
-                if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
-                if (item.ext === 'html') mode = 'text/html';
-                if (item.ext === 'css') mode = 'text/css';
-                if (item.ext === 'php') mode = 'application/x-httpd-php';
+                // Optimization: disable expensive parsing engines on files >= 2MB to keep 60fps interaction responsiveness
+                if (res.content && res.content.length < 2 * 1024 * 1024) {
+                  if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
+                  if (item.ext === 'html') mode = 'text/html';
+                  if (item.ext === 'css') mode = 'text/css';
+                  if (item.ext === 'php') mode = 'application/x-httpd-php';
+                }
+
+                if (this.editor) {
+                  this.editor.toTextArea();
+                  this.editor = null;
+                }
 
                 this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
                   lineNumbers: true,
@@ -2976,7 +2994,11 @@ if (isset($_GET['batch'])) {
                   lineWrapping: this.editorWrap,
                   viewportMargin: 10
                 });
-                this.editor.setValue(res.content);
+                
+                // Batch content population under an operation wrapper to speed up rendering
+                this.editor.operation(() => {
+                  this.editor.setValue(res.content);
+                });
                 setTimeout(() => this.editor.refresh(), 50);
               }
             }
@@ -2990,6 +3012,7 @@ if (isset($_GET['batch'])) {
             document.getElementById('imageModalContent').innerHTML = '';
           }
           this.currentEditFile = null;
+          this.restoreDocumentTitle();
           const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
           window.history.pushState({}, '', qs);
         }
@@ -3001,6 +3024,7 @@ if (isset($_GET['batch'])) {
             document.getElementById('mediaModalContent').innerHTML = '';
           }
           this.currentEditFile = null;
+          this.restoreDocumentTitle();
           const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
           window.history.pushState({}, '', qs);
         }
@@ -3071,12 +3095,19 @@ if (isset($_GET['batch'])) {
           }
 
           if (this.editor) {
-            this.editor.getAllMarks().forEach(m => m.clear());
-            const cursor = this.editor.getSearchCursor(term);
-            while (cursor.findNext()) {
-              this.frMatches.push({from: cursor.from(), to: cursor.to()});
-              this.editor.markText(cursor.from(), cursor.to(), {className: 'search-highlight'});
-            }
+            this.editor.operation(() => {
+              this.editor.getAllMarks().forEach(m => m.clear());
+              const cursor = this.editor.getSearchCursor(term);
+              let limit = 500; // Limit active visual DOM highlights to 500 to protect rendering performance
+              while (cursor.findNext()) {
+                const match = {from: cursor.from(), to: cursor.to()};
+                this.frMatches.push(match);
+                if (limit > 0) {
+                  this.editor.markText(match.from, match.to, {className: 'search-highlight'});
+                  limit--;
+                }
+              }
+            });
           } else {
             const text = document.getElementById('mobileTextarea').value;
             let idx = text.indexOf(term);
@@ -3181,10 +3212,15 @@ if (isset($_GET['batch'])) {
         }
 
         closeEditor() {
+          this.closeFindReplace();
           document.getElementById('editorOverlay').style.display = 'none';
           document.getElementById('mediaViewerContainer').innerHTML = '';
           this.currentEditFile = null;
-          this.editor = null;
+          if (this.editor) {
+            this.editor.toTextArea();
+            this.editor = null;
+          }
+          this.restoreDocumentTitle();
           
           const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
           window.history.pushState({}, '', qs);
