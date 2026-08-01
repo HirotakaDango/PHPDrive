@@ -66,19 +66,20 @@ function save_file_version($filepath) {
 function generateUniqueFileName($dir, $filename) {
   $baseName = pathinfo($filename, PATHINFO_FILENAME);
   $extension = pathinfo($filename, PATHINFO_EXTENSION);
+  $extPart = $extension ? '.' . $extension : '';
   $counter = 1;
-  while (file_exists($dir . '/' . $baseName . '_' . $counter . '.' . $extension)) {
+  while (file_exists($dir . '/' . $baseName . '_(' . $counter . ')' . $extPart)) {
     $counter++;
   }
-  return $baseName . '_' . $counter . '.' . $extension;
+  return $baseName . '_(' . $counter . ')' . $extPart;
 }
 
 function generateUniqueFolderName($dir, $foldername) {
   $counter = 1;
-  while (is_dir($dir . '/' . $foldername . '_' . $counter)) {
+  while (is_dir($dir . '/' . $foldername . '_(' . $counter . ')')) {
     $counter++;
   }
-  return $foldername . '_' . $counter;
+  return $foldername . '_(' . $counter . ')';
 }
 
 function recursiveCopy($src, $dst) {
@@ -349,7 +350,10 @@ if ($api) {
         case 'add_file':
           $name = $input['name'] ?? '';
           $full = $absPath . '/' . $name;
-          if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
+          if (file_exists($full)) {
+            $name = generateUniqueFileName($absPath, $name);
+            $full = $absPath . '/' . $name;
+          }
           file_put_contents($full, '');
           echo json_encode(['success' => true]);
           break;
@@ -357,7 +361,10 @@ if ($api) {
         case 'add_folder':
           $name = $input['name'] ?? '';
           $full = $absPath . '/' . $name;
-          if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
+          if (file_exists($full)) {
+            $name = generateUniqueFolderName($absPath, $name);
+            $full = $absPath . '/' . $name;
+          }
           mkdir($full);
           echo json_encode(['success' => true]);
           break;
@@ -377,10 +384,6 @@ if ($api) {
             $targetDir = dirname($dest);
             if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
 
-            if ($chunk === 0 && file_exists($dest) && !$override) {
-              echo json_encode(['success' => false, 'error' => 'CONFLICT|' . basename($dest)]);
-              exit;
-            }
             if ($chunk === 0 && file_exists($dest) && $override) {
               save_file_version($dest);
             }
@@ -397,11 +400,19 @@ if ($api) {
                 fclose($out);
               }
               if ($chunk == $chunks - 1) {
-                rename($tempDest, $dest);
+                $finalDest = $dest;
+                if (file_exists($finalDest) && !$override) {
+                  $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
+                }
+                rename($tempDest, $finalDest);
                 $uploaded++;
               }
             } else {
-              if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+              $finalDest = $dest;
+              if (file_exists($finalDest) && !$override) {
+                $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
+              }
+              if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $finalDest)) {
                 $uploaded++;
               }
             }
@@ -416,7 +427,10 @@ if ($api) {
           if (!$name) $name = 'downloaded_file_' . time();
           $target = $absPath . '/' . $name;
           
-          if (file_exists($target) && !$override) throw new Exception('CONFLICT|' . $name);
+          if (file_exists($target) && !$override) {
+            $name = generateUniqueFileName($absPath, $name);
+            $target = $absPath . '/' . $name;
+          }
           if (file_exists($target) && $override) save_file_version($target);
           file_put_contents($target, file_get_contents($url));
           echo json_encode(['success' => true]);
@@ -428,8 +442,11 @@ if ($api) {
           $zipName = (count($items) === 1) ? basename($items[0]) . '.zip' : 'Archive_' . date('Ymd_His') . '.zip';
           $target = $absPath . '/' . $zipName;
           
-          if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . $zipName);
-          if (file_exists($target)) save_file_version($target);
+          if (file_exists($target) && empty($input['override'])) {
+            $zipName = generateUniqueFileName($absPath, $zipName);
+            $target = $absPath . '/' . $zipName;
+          }
+          if (file_exists($target) && !empty($input['override'])) save_file_version($target);
           
           $zip = new ZipArchive();
           if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
@@ -521,6 +538,7 @@ if ($api) {
                   'original_parent' => ltrim(str_replace($baseDir, '', dirname($full)), '/'),
                   'deleted_at' => time()
                 ];
+                $meta['starred'] = array_values(array_diff($meta['starred'], [$itemPath]));
               }
             }
           }
@@ -539,7 +557,14 @@ if ($api) {
               $targetDir = $baseDir . '/' . $info['original_parent'];
               if (!is_dir($targetDir)) $targetDir = $baseDir;
               $dest = $targetDir . '/' . $info['original_name'];
-              if (file_exists($dest) && empty($input['override'])) throw new Exception('CONFLICT|' . $info['original_name']);
+              if (file_exists($dest) && empty($input['override'])) {
+                if (is_dir($trashBin . '/' . $uniq)) {
+                  $destName = generateUniqueFolderName($targetDir, $info['original_name']);
+                } else {
+                  $destName = generateUniqueFileName($targetDir, $info['original_name']);
+                }
+                $dest = $targetDir . '/' . $destName;
+              }
               if (file_exists($dest) && !empty($input['override'])) save_file_version($dest);
               if (rename($trashBin . '/' . $uniq, $dest)) {
                 unset($meta['trash'][$uniq]);
@@ -622,10 +647,17 @@ if ($api) {
           foreach ($items as $item) {
             $src = $baseDir . '/' . $item;
             if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
-            $dest = $targetDir . '/' . basename($item);
+            
+            $destName = basename($item);
+            $dest = $targetDir . '/' . $destName;
             
             if (file_exists($dest) && !$override) {
-              throw new Exception('CONFLICT|' . basename($item));
+              if (is_dir($src)) {
+                $destName = generateUniqueFolderName($targetDir, $destName);
+              } else {
+                $destName = generateUniqueFileName($targetDir, $destName);
+              }
+              $dest = $targetDir . '/' . $destName;
             }
             if (file_exists($dest) && $override) {
               save_file_version($dest);
@@ -662,7 +694,10 @@ if ($api) {
             $parentDir = dirname($src);
             $extractTarget = $parentDir . '/' . $folderName;
             
-            if (file_exists($extractTarget) && empty($input['override'])) throw new Exception('CONFLICT|' . $folderName);
+            if (file_exists($extractTarget) && empty($input['override'])) {
+              $folderName = generateUniqueFolderName($parentDir, $folderName);
+              $extractTarget = $parentDir . '/' . $folderName;
+            }
             if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
             
             $zip->extractTo($extractTarget);
@@ -893,45 +928,90 @@ if ($api) {
           break;
 
         case 'properties':
-          $file = $_GET['file'] ?? '';
-          $full = $baseDir . '/' . $file;
-          if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
-          $stat = stat($full);
-          $is_dir = is_dir($full);
-          $size = $stat['size'];
-          $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
-          $contentStr = '';
+          $fileParam = $_GET['file'] ?? '';
+          $files = array_filter(explode('|', $fileParam));
+          if (empty($files)) throw new Exception('Invalid item');
           
-          if ($is_dir) {
+          if (count($files) === 1) {
+            $file = $files[0];
+            $full = $baseDir . '/' . $file;
+            if (!file_exists($full)) {
+              $trashFull = $baseDir . '/.drive_trash_bin/' . $file;
+              if (file_exists($trashFull)) $full = $trashFull;
+            }
+            if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
+            $stat = stat($full);
+            $is_dir = is_dir($full);
+            $size = $stat['size'];
+            $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
+            $contentStr = '';
+            
+            if ($is_dir) {
+              $total_files = 0;
+              $total_folders = 0;
+              $total_size = 0;
+              $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+              foreach ($iter as $f) {
+                if ($f->isDir()) {
+                  $total_folders++;
+                } else {
+                  $total_files++;
+                  $total_size += $f->getSize();
+                }
+              }
+              $size = $total_size;
+              $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+            }
+
+            echo json_encode([
+              'success' => true,
+              'data' => [
+                'name' => basename($file),
+                'type' => $typeStr,
+                'size' => formatBytes($size),
+                'contents' => $contentStr,
+                'modified' => date("Y-m-d H:i:s", $stat['mtime']),
+                'created' => date("Y-m-d H:i:s", $stat['ctime']),
+                'permissions' => substr(sprintf('%o', fileperms($full)), -4)
+              ]
+            ]);
+          } else {
+            $total_size = 0;
             $total_files = 0;
             $total_folders = 0;
-            $total_size = 0;
-            // Recursively calculate bulk size and contents count
-            $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
-            foreach ($iter as $f) {
-              if ($f->isDir()) {
-                $total_folders++;
-              } else {
-                $total_files++;
-                $total_size += $f->getSize();
+            foreach ($files as $f) {
+              $full = $baseDir . '/' . $f;
+              if (!file_exists($full)) {
+                $trashFull = $baseDir . '/.drive_trash_bin/' . $f;
+                if (file_exists($trashFull)) $full = $trashFull;
               }
+              if (isValidPath($baseDir, $full) && file_exists($full)) {
+                if (is_dir($full)) {
+                  $total_folders++;
+                  $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                  foreach ($iter as $item) {
+                    if ($item->isDir()) $total_folders++;
+                      else { $total_files++; $total_size += $item->getSize(); }
+                    }
+                  } else {
+                    $total_files++;
+                    $total_size += filesize($full);
+                  }
+               }
             }
-            $size = $total_size;
-            $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+            echo json_encode([
+              'success' => true,
+              'data' => [
+                'name' => count($files) . ' items selected',
+                'type' => 'Multiple Selection',
+                'size' => formatBytes($total_size),
+                'contents' => $total_files . ' files, ' . $total_folders . ' folders',
+                'modified' => '-',
+                'created' => '-',
+                'permissions' => '-'
+              ]
+            ]);
           }
-
-          echo json_encode([
-            'success' => true,
-            'data' => [
-              'name' => basename($file),
-              'type' => $typeStr,
-              'size' => formatBytes($size),
-              'contents' => $contentStr,
-              'modified' => date("Y-m-d H:i:s", $stat['mtime']),
-              'created' => date("Y-m-d H:i:s", $stat['ctime']),
-              'permissions' => substr(sprintf('%o', fileperms($full)), -4)
-            ]
-          ]);
           break;
 
         default:
@@ -1184,9 +1264,10 @@ if (isset($_GET['batch'])) {
       .grid-view .file-card .file-preview .material-symbols-rounded { font-size: 64px; color: var(--theme-primary); }
       .grid-view .file-card .file-info-bar { height: 56px; display: flex; align-items: center; padding: 0 40px; gap: 12px; border-top: 1px solid var(--theme-outline-variant); }
       
-      .list-view .item-card { height: 48px; border-radius: 0; border-bottom: 1px solid var(--theme-outline-variant); flex-direction: row; align-items: center; padding: 0 40px; gap: 16px; background: transparent; }
-      .list-view .item-card:hover { background-color: var(--theme-surface-container-low); border-radius: 24px; border-bottom-color: transparent; margin: 0 -8px; padding: 0 24px 0 48px; }
-      .list-view .item-card.selected { background-color: var(--theme-secondary-container); border-radius: 24px; border-bottom-color: transparent; margin: 0 -8px; padding: 0 24px 0 48px; }
+      .list-view { display: flex; flex-direction: column; gap: 6px; }
+      .list-view .item-card { height: auto; min-height: 52px; border-radius: 10px; border: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-direction: row; align-items: center; padding: 8px 40px; gap: 12px; }
+      .list-view .item-card:hover { background-color: var(--theme-surface-container-high); border-color: var(--theme-primary); margin: 0; }
+      .list-view .item-card.selected { background-color: var(--theme-secondary-container); border-color: var(--theme-primary); color: var(--theme-on-secondary-container); margin: 0; }
       
       .item-icon { color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; }
       .item-icon .material-symbols-rounded { color: inherit; }
@@ -1194,9 +1275,10 @@ if (isset($_GET['batch'])) {
       .folder-icon { color: var(--theme-on-surface-variant); font-variation-settings: 'FILL' 1; }
       .folder-icon .material-symbols-rounded { color: inherit; }
       .item-card.selected .folder-icon .material-symbols-rounded { color: var(--theme-primary); }
+      .item-details { display: flex; flex-direction: column; min-width: 0; flex: 1; }
       .item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 500; }
+      .item-sub-meta { font-size: 11px; color: var(--theme-on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
       .item-meta { display: none; font-size: 12px; color: var(--theme-on-surface-variant); width: 100px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .list-view .item-meta { display: block; }
       
       .search-highlight { background: #f9e79f; color: #1f1f1f; border-radius: 2px; }
       
@@ -1295,7 +1377,7 @@ if (isset($_GET['batch'])) {
         .grid-view .file-card { height: 160px; padding: 0; }
         .grid-view .file-card .file-info-bar { height: 48px; padding: 0 12px 0 36px; }
         
-        .list-view .item-card { padding: 0 12px 0 36px; gap: 12px; }
+        .list-view .item-card { padding: 8px 12px 8px 36px; gap: 12px; }
         .list-view .item-meta { display: none; }
         
         .fab { position: fixed; bottom: 24px; right: 24px; z-index: 90; width: 56px; height: 56px; padding: 0; justify-content: center; border-radius: 28px; }
@@ -1372,13 +1454,15 @@ if (isset($_GET['batch'])) {
       <main class="content-area" id="dropZone">
         <div class="content-header">
           <div class="breadcrumbs" id="breadcrumbs"></div>
+          <div class="header-actions" id="trashActions" style="display: none;">
+            <button class="btn btn-text" onclick="app.emptyTrash()"><span class="material-symbols-rounded">delete_forever</span> Empty Trash</button>
+          </div>
           <div class="header-actions" id="multiSelectActions" style="display: none;">
+            <button class="icon-btn" onclick="app.toggleProperties()" title="View Properties"><span class="material-symbols-rounded">info</span></button>
+            <button class="icon-btn" id="restoreSelectedBtn" onclick="app.restoreSelected()" title="Restore Selected" style="display: none;"><span class="material-symbols-rounded">restore_from_trash</span></button>
             <button class="icon-btn" onclick="app.batchDownload('selected')" title="Download Selected"><span class="material-symbols-rounded">download</span></button>
             <button class="icon-btn" onclick="app.deleteSelected()" title="Move to Trash"><span class="material-symbols-rounded">delete</span></button>
             <button class="icon-btn" onclick="app.clearSelection(null, true)" title="Clear Selection"><span class="material-symbols-rounded">close</span></button>
-          </div>
-          <div class="header-actions" id="trashActions" style="display: none; gap: 8px;">
-            <button class="btn btn-text" onclick="app.emptyTrash()"><span class="material-symbols-rounded">delete_forever</span> Empty Trash</button>
           </div>
         </div>
 
@@ -1560,7 +1644,7 @@ if (isset($_GET['batch'])) {
       class FileManager {
         constructor() {
           this.currentPath = new URLSearchParams(window.location.search).get('path') || '';
-          this.viewMode = localStorage.getItem('viewMode') || 'grid';
+          this.viewMode = localStorage.getItem('viewMode') || 'list';
           this.theme = localStorage.getItem('theme') || 'light';
           this.sortBy = localStorage.getItem('sortBy') || 'name';
           this.sortDesc = localStorage.getItem('sortDesc') === 'true';
@@ -1734,8 +1818,39 @@ if (isset($_GET['batch'])) {
             
             if (e.dataTransfer.items && e.dataTransfer.items.length) {
               this.showToast('Scanning dropped items...');
-              const { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
+              let { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
               if (files.length > 0) {
+                const listRes = await this.fetchAPI('list');
+                const existingFolders = (listRes && listRes.success && listRes.folders) ? listRes.folders.map(f => f.name) : [];
+                
+                const renamedRoots = {};
+                paths = paths.map(p => {
+                   if (p.includes('/')) {
+                      const root = p.split('/')[0];
+                      if (!renamedRoots[root] && existingFolders.includes(root)) {
+                         let counter = 1;
+                         let newRoot = `${root}_(${counter})`;
+                         while(existingFolders.includes(newRoot)) {
+                            counter++;
+                            newRoot = `${root}_(${counter})`;
+                         }
+                         renamedRoots[root] = newRoot;
+                         existingFolders.push(newRoot); 
+                      }
+                      if (renamedRoots[root]) {
+                         const parts = p.split('/');
+                         parts[0] = renamedRoots[root];
+                         return parts.join('/');
+                      }
+                   }
+                   return p;
+                });
+                
+                const renamedKeys = Object.keys(renamedRoots);
+                if (renamedKeys.length > 0) {
+                   this.showToast(`Renamed ${renamedKeys.length} folder(s) to avoid collision.`);
+                }
+
                 this.uploadFiles(files, paths);
               }
             } else if (e.dataTransfer.files.length) {
@@ -1853,7 +1968,8 @@ if (isset($_GET['batch'])) {
           
           document.getElementById('chipsContainer').style.display = mode === 'home' ? 'flex' : 'none';
           document.getElementById('recentsSection').style.display = mode === 'home' ? 'block' : 'none';
-          document.getElementById('trashActions').style.display = mode === 'trash' ? 'flex' : 'none';
+          const trashActionsEl = document.getElementById('trashActions');
+          if (trashActionsEl) trashActionsEl.style.display = mode === 'trash' ? 'flex' : 'none';
 
           this.closeSidebarOnMobile();
           this.loadDirectory(this.currentPath);
@@ -2070,7 +2186,10 @@ if (isset($_GET['batch'])) {
               <div class="item-meta">${item.deleted_at}</div>
             `;
             
-            el.onclick = () => this.toggleSelect(null, item.uniq);
+            el.onclick = (e) => {
+              if (e.target.closest('.card-checkbox')) return;
+              this.toggleSelect(null, item.uniq);
+            };
             el.oncontextmenu = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -2155,13 +2274,15 @@ if (isset($_GET['batch'])) {
             `;
           } else {
             el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-            const date = new Date(item.mtime * 1000).toLocaleDateString();
+            const date = new Date(item.mtime * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+            const metaStr = isFolder ? `${date}` : `${item.formatSize} • ${date}`;
             el.innerHTML = `
               ${checkboxHtml}
               <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
-              <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-              <div class="item-meta">${date}</div>
-              <div class="item-meta">${isFolder ? '-' : item.formatSize}</div>
+              <div class="item-details">
+                <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                <div class="item-sub-meta">${metaStr}</div>
+              </div>
               ${starHtml}
             `;
           }
@@ -2216,14 +2337,25 @@ if (isset($_GET['batch'])) {
           if (dlBtn) {
             dlBtn.style.display = this.currentViewMode === 'trash' ? 'none' : 'flex';
           }
+
+          const restoreBtn = document.getElementById('restoreSelectedBtn');
+          if (restoreBtn) {
+            restoreBtn.style.display = this.currentViewMode === 'trash' ? 'flex' : 'none';
+          }
+
+          if (this.isPropertiesOpen) {
+            if (this.selectedItems.size > 0) {
+              this.loadProperties([...this.selectedItems].join('|'));
+            } else {
+              this.renderPropertiesEmpty();
+            }
+          }
         }
 
         toggleSelect(e, path) {
           if (e) e.stopPropagation();
           this.selectedItems.has(path) ? this.selectedItems.delete(path) : this.selectedItems.add(path);
           this.syncSelectionUI();
-          if (this.selectedItems.size === 1) this.loadProperties([...this.selectedItems][0]);
-          else this.renderPropertiesEmpty();
         }
 
         async toggleStar(e, path) {
@@ -2266,12 +2398,18 @@ if (isset($_GET['batch'])) {
         selectAll() {
           this.isSelectMode = true;
           this.selectedItems.clear();
-          const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-          const allItems = [
-            ...(this.currentFilter === 'all' ? this.data.folders.filter(filterFn) : []),
-            ...this.filterByType(this.data.files.filter(filterFn))
-          ];
-          allItems.forEach(i => this.selectedItems.add(i.path));
+          if (this.currentViewMode === 'trash') {
+            document.querySelectorAll('#filesList .item-card').forEach(el => {
+              if (el.dataset.uniq) this.selectedItems.add(el.dataset.uniq);
+            });
+          } else {
+            const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
+            const allItems = [
+              ...(this.currentFilter === 'all' ? this.data.folders.filter(filterFn) : []),
+              ...this.filterByType(this.data.files.filter(filterFn))
+            ];
+            allItems.forEach(i => this.selectedItems.add(i.path));
+          }
           this.syncSelectionUI();
         }
 
@@ -2356,10 +2494,12 @@ if (isset($_GET['batch'])) {
         toggleProperties() {
           this.isPropertiesOpen = !this.isPropertiesOpen;
           document.getElementById('propertiesPane').style.display = this.isPropertiesOpen ? 'flex' : 'none';
-          if (this.isPropertiesOpen && this.selectedItems.size === 1) {
-            this.loadProperties([...this.selectedItems][0]);
-          } else {
-            this.renderPropertiesEmpty();
+          if (this.isPropertiesOpen) {
+            if (this.selectedItems.size > 0) {
+              this.loadProperties([...this.selectedItems].join('|'));
+            } else {
+              this.renderPropertiesEmpty();
+            }
           }
         }
 
@@ -2523,6 +2663,10 @@ if (isset($_GET['batch'])) {
           } else {
             addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
             addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
+            addMenuItem('info', 'Properties', () => {
+              this.isPropertiesOpen = false;
+              this.toggleProperties();
+            });
             const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
           }
           
@@ -2562,6 +2706,10 @@ if (isset($_GET['batch'])) {
 
           addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
           addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
+          addMenuItem('info', 'Properties', () => {
+            this.isPropertiesOpen = false;
+            this.toggleProperties();
+          });
           
           menu.style.display = 'flex';
           
@@ -2573,35 +2721,6 @@ if (isset($_GET['batch'])) {
           if (x < 8) x = 8;
           if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
           if (y < 8) y = 8;
-          
-          menu.style.left = `${x}px`;
-          menu.style.top = `${y}px`;
-        }
-
-        showTrashContextMenu(e, item) {
-          const menu = document.getElementById('contextMenu');
-          menu.innerHTML = '';
-          
-          const addMenuItem = (icon, text, action) => {
-            const div = document.createElement('div');
-            div.className = 'menu-item';
-            div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
-            div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
-            menu.appendChild(div);
-          };
-
-          addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
-          addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
-          
-          menu.style.display = 'flex';
-          
-          let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-          let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
-          
-          const rect = menu.getBoundingClientRect();
-          if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-          if (y + rect.height > window.innerHeight) y -= rect.height;
-          if (x < 0) x = 8;
           
           menu.style.left = `${x}px`;
           menu.style.top = `${y}px`;
@@ -2781,7 +2900,20 @@ if (isset($_GET['batch'])) {
           const res = await this.fetchAPI('restore_trash', 'POST', { action: 'restore_trash', items: [uniq] });
           if (res) {
             this.showToast('Item restored');
+            this.selectedItems.delete(uniq);
+            this.syncSelectionUI();
             this.loadDirectory(this.currentPath);
+          }
+        }
+
+        async restoreSelected() {
+          if (this.selectedItems.size === 0) return;
+          const res = await this.fetchAPI('restore_trash', 'POST', { action: 'restore_trash', items: Array.from(this.selectedItems) });
+          if (res) {
+            this.showToast(`${this.selectedItems.size} item(s) restored`);
+            this.selectedItems.clear();
+            this.loadDirectory(this.currentPath);
+            this.renderPropertiesEmpty();
           }
         }
 
@@ -2790,6 +2922,8 @@ if (isset($_GET['batch'])) {
           const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: [uniq] });
           if (res) {
             this.showToast('Item deleted forever');
+            this.selectedItems.delete(uniq);
+            this.syncSelectionUI();
             this.loadDirectory(this.currentPath);
           }
         }
@@ -2826,12 +2960,31 @@ if (isset($_GET['batch'])) {
           e.target.value = '';
         }
 
-        handleFolderSelect(e) {
+        async handleFolderSelect(e) {
           if (e.target.files.length) {
-            const files = e.target.files;
-            const paths = [];
-            for (let i = 0; i < files.length; i++) {
-              paths.push(files[i].webkitRelativePath || '');
+            const files = Array.from(e.target.files);
+            let paths = files.map(f => f.webkitRelativePath || f.name);
+            
+            if (paths.length > 0 && paths[0].includes('/')) {
+               const rootFolderName = paths[0].split('/')[0];
+               const listRes = await this.fetchAPI('list');
+               if (listRes && listRes.success && listRes.folders) {
+                  const existingFolders = listRes.folders.map(f => f.name);
+                  if (existingFolders.includes(rootFolderName)) {
+                     let counter = 1;
+                     let newRoot = `${rootFolderName}_(${counter})`;
+                     while(existingFolders.includes(newRoot)) {
+                        counter++;
+                        newRoot = `${rootFolderName}_(${counter})`;
+                     }
+                     paths = paths.map(p => {
+                        const parts = p.split('/');
+                        parts[0] = newRoot;
+                        return parts.join('/');
+                     });
+                     this.showToast(`Folder renamed to ${newRoot} to avoid collision.`);
+                  }
+               }
             }
             this.uploadFiles(files, paths);
           }
