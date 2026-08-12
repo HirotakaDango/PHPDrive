@@ -1,7 +1,6 @@
 # PHPDrive
 
-<img width="1280" height="720" alt="Screenshot_20260703_120729" src="https://github.com/user-attachments/assets/10e84ad2-fc26-4efd-abb4-c8c860e5852e" />
-
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/7f146c96-a8eb-4086-b08d-5a3d9ef70e53" />
 
 A fast, minimal, and open-source file manager contained entirely in a single PHP file. 
 
