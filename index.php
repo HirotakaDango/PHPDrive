@@ -1103,7 +1103,6 @@ if (isset($_GET['batch'])) {
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material-darker.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.css">
     <style>
       :root {
         --sys-light-primary: #0b57d0;
@@ -1308,7 +1307,7 @@ if (isset($_GET['batch'])) {
       .editor-title { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .editor-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; position: relative; }
       .CodeMirror { position: absolute !important; top: 0; left: 0; right: 0; bottom: 0; height: 100% !important; font-family: monospace; font-size: 14px; }
-      .CodeMirror-scroll { padding-bottom: 120px !important; }
+      .CodeMirror-lines { padding-bottom: 120px !important; }
       .CodeMirror-wrap .CodeMirror-scroll { overflow-x: hidden !important; }
       
       .mobile-editor-container { flex: 1; display: none; flex-direction: column; background: var(--theme-surface); height: 100%; }
@@ -1621,10 +1620,8 @@ if (isset($_GET['batch'])) {
     <div class="snackbar-container" id="snackbarContainer"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/search.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/searchcursor.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/jump-to-line.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/xml/xml.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/css/css.min.js"></script>
@@ -1866,6 +1863,10 @@ if (isset($_GET['batch'])) {
             if (e.ctrlKey && e.key === 's' && document.getElementById('editorOverlay').style.display === 'flex') {
               e.preventDefault();
               this.saveFile();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'f' && document.getElementById('editorOverlay').style.display === 'flex') {
+              e.preventDefault();
+              this.editorFind();
             }
             if (e.key === 'Delete' && this.selectedItems.size > 0 && document.activeElement.tagName !== 'INPUT') {
               this.deleteSelected();
@@ -3145,7 +3146,11 @@ if (isset($_GET['batch'])) {
                   indentUnit: 2,
                   tabSize: 2,
                   lineWrapping: this.editorWrap,
-                  viewportMargin: 10
+                  viewportMargin: 10,
+                  extraKeys: {
+                    "Ctrl-F": () => this.editorFind(),
+                    "Cmd-F": () => this.editorFind()
+                  }
                 });
                 
                 // Batch content population under an operation wrapper to speed up rendering
