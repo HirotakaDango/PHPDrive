@@ -1404,6 +1404,14 @@ if (isset($_GET['batch'])) {
       .mobile-editor-container { flex: 1; display: none; flex-direction: column; background: var(--theme-surface); height: 100%; }
       .mobile-textarea { flex: 1; border: none; outline: none; background: transparent; padding: 16px 16px 120px 16px; font-family: monospace; font-size: 16px; color: var(--theme-on-surface); resize: none; width: 100%; line-height: 1.5; height: 100%; }
       
+      /* Editor Selection Highlighting */
+      .CodeMirror-selected { background: rgba(11, 87, 208, 0.45) !important; }
+      .CodeMirror-focused .CodeMirror-selected { background: rgba(11, 87, 208, 0.55) !important; }
+      .CodeMirror-line::selection,
+      .CodeMirror-line > span::selection,
+      .CodeMirror-line > span > span::selection,
+      .mobile-textarea::selection { background: #0b57d0 !important; color: #ffffff !important; }
+      
       .media-player-container { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--theme-surface-container-low); padding: 24px 24px 120px 24px; gap: 24px; overflow-y: auto; }
       .media-art { width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center; }
       .media-art .material-symbols-rounded { font-size: 64px; color: var(--theme-primary); }
@@ -2829,15 +2837,36 @@ if (isset($_GET['batch'])) {
         showSortMenu(e) {
           e.stopPropagation();
           document.getElementById('moreMenu').style.display = 'none';
+          document.getElementById('newMenu').style.display = 'none';
+          document.getElementById('contextMenu').style.display = 'none';
           const menu = document.getElementById('sortMenu');
           menu.style.display = 'flex';
-          const rect = e.currentTarget.getBoundingClientRect();
-          menu.style.top = `${rect.bottom + 8}px`;
-          menu.style.right = '16px';
-          menu.style.left = 'auto';
           
-          ['name','mtime','size'].forEach(k => {
-            document.getElementById('sort_'+k).classList.toggle('active', this.sortBy === k);
+          const rect = e.currentTarget.getBoundingClientRect();
+          let left = rect.left;
+          let top = rect.bottom + 8;
+          
+          const menuRect = menu.getBoundingClientRect();
+          
+          // If menu overflows the bottom edge, open upwards
+          if (top + menuRect.height > window.innerHeight - 8) {
+            top = rect.top - menuRect.height - 8;
+            if (top < 8) top = Math.max(8, window.innerHeight - menuRect.height - 8);
+          }
+          
+          // If menu overflows the right edge, shift left
+          if (left + menuRect.width > window.innerWidth - 8) {
+            left = window.innerWidth - menuRect.width - 8;
+          }
+          if (left < 8) left = 8;
+          
+          menu.style.top = `${top}px`;
+          menu.style.left = `${left}px`;
+          menu.style.right = 'auto';
+          menu.style.bottom = 'auto';
+          
+          ['name', 'mtime', 'size'].forEach(k => {
+            document.getElementById('sort_' + k).classList.toggle('active', this.sortBy === k);
           });
           document.getElementById('sortDirIcon').textContent = this.sortDesc ? 'arrow_downward' : 'arrow_upward';
         }
