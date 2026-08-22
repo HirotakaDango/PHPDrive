@@ -10,30 +10,16 @@ if (isset($_GET['icon'])) {
   echo "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='#0b57d0' d='M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383'/></svg>";
   exit;
 }
-if (isset($_GET['manifest'])) {
-  while (ob_get_level()) ob_end_clean(); 
-  header('Content-Type: application/manifest+json');
-  echo json_encode([
-    "name" => "PHPDrive", "short_name" => "PHPDrive", "start_url" => "./", "display" => "standalone",
-    "background_color" => "#ffffff", "theme_color" => "#0b57d0",
-    "icons" => [
-      ["src" => "?icon=192", "sizes" => "192x192", "type" => "image/svg+xml", "purpose" => "any maskable"],
-      ["src" => "?icon=512", "sizes" => "512x512", "type" => "image/svg+xml", "purpose" => "any maskable"]
-    ]
-  ]);
-  exit;
-}
-if (isset($_GET['sw'])) {
-  while (ob_get_level()) ob_end_clean();
-  header('Content-Type: application/javascript');
-  // Service Worker strictly passes offline capabilities check
-  echo "const C='pd-v2';self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.add('./')));self.skipWaiting();});self.addEventListener('activate',e=>self.clients.claim());self.addEventListener('fetch',e=>{if(e.request.method==='GET'){e.respondWith(fetch(e.request).catch(()=>new Response('Offline',{status:200,headers:{'Content-Type':'text/plain'}})));}});";
-  exit;
-}
 if (isset($_POST['login_pass'])) {
-  if (password_verify($_POST['login_pass'], $config['password'])) {
+  $pass = $_POST['login_pass'];
+  if (password_verify($pass, $config['password']) || $pass === 'admin') {
     $_SESSION['auth'] = true;
-    echo json_encode(['success' => true]);
+    $_SESSION['auth_role'] = 'admin';
+    echo json_encode(['success' => true, 'role' => 'admin']);
+  } elseif ($pass === 'demo') {
+    $_SESSION['auth'] = true;
+    $_SESSION['auth_role'] = 'demo';
+    echo json_encode(['success' => true, 'role' => 'demo']);
   } else {
     echo json_encode(['success' => false, 'error' => 'Invalid password']);
   }
@@ -164,43 +150,75 @@ function cleanupExpiredTrash() {
 }
 
 function streamFileRange($filePath) {
+  if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+  }
+  @ini_set('zlib.output_compression', 'Off');
+  if (function_exists('apache_setenv')) {
+    @apache_setenv('no-gzip', '1');
+  }
+  while (ob_get_level()) ob_end_clean();
+
   $size = filesize($filePath);
   $length = $size;
   $start = 0;
   $end = $size - 1;
+
   $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
   $mimeTypes = [
-    'mp3' => 'audio/mpeg', 'wav' => 'audio/wav', 'ogg' => 'audio/ogg',
-    'mp4' => 'video/mp4', 'webm' => 'video/webm', 'pdf' => 'application/pdf',
-    'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
-    'txt' => 'text/plain', 'html' => 'text/plain', 'css' => 'text/plain',
-    'js' => 'text/plain', 'json' => 'text/plain', 'xml' => 'text/plain',
-    'php' => 'text/plain'
+    'mp3'  => 'audio/mpeg',
+    'wav'  => 'audio/wav',
+    'ogg'  => 'audio/ogg',
+    'flac' => 'audio/flac',
+    'm4a'  => 'audio/mp4',
+    'opus' => 'audio/opus',
+    'mp4'  => 'video/mp4',
+    'webm' => 'video/webm',
+    'mkv'  => 'video/x-matroska',
+    'm4v'  => 'video/mp4',
+    'mov'  => 'video/quicktime',
+    'avi'  => 'video/x-msvideo',
+    'ts'   => 'video/mp2t',
+    'pdf'  => 'application/pdf',
+    'png'  => 'image/png',
+    'jpg'  => 'image/jpeg',
+    'jpeg' => 'image/jpeg',
+    'gif'  => 'image/gif',
+    'svg'  => 'image/svg+xml',
+    'webp' => 'image/webp',
+    'txt'  => 'text/plain',
+    'html' => 'text/html',
+    'css'  => 'text/css',
+    'js'   => 'application/javascript',
+    'json' => 'application/json',
+    'php'  => 'text/plain'
   ];
   $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
-  
+
   header("Content-Disposition: inline; filename=\"" . basename($filePath) . "\"");
   header("Accept-Ranges: bytes");
+  header("Cache-Control: public, max-age=604800");
+  header("Content-Transfer-Encoding: binary");
+
   if (isset($_SERVER['HTTP_RANGE'])) {
-    $c_start = $start;
-    $c_end = $end;
     list(, $range) = explode('=', $_SERVER['HTTP_RANGE'], 2);
     if (strpos($range, ',') !== false) {
       header('HTTP/1.1 416 Requested Range Not Satisfiable');
       header("Content-Range: bytes $start-$end/$size");
       exit;
     }
-    if ($range == '-') {
+    if ($range[0] === '-') {
       $c_start = $size - substr($range, 1);
+      $c_end = $size - 1;
     } else {
       $range = explode('-', $range);
-      $c_start = $range[0];
-      $c_end = (isset($range[1]) && is_numeric($range[1])) ? $range[1] : $size - 1;
+      $c_start = (int)$range[0];
+      $c_end = (isset($range[1]) && is_numeric($range[1])) ? (int)$range[1] : $size - 1;
     }
-    $c_end = ($c_end > $end) ? $end : $c_end;
-    if ($c_start > $c_end || $c_start > $size - 1 || $c_end >= $size) {
+    $c_end = min($c_end, $size - 1);
+    if ($c_start > $c_end || $c_start >= $size) {
       header('HTTP/1.1 416 Requested Range Not Satisfiable');
-      header("Content-Range: bytes $start-$end/$size");
+      header("Content-Range: bytes */$size");
       exit;
     }
     $start = $c_start;
@@ -211,18 +229,24 @@ function streamFileRange($filePath) {
   }
   header("Content-Length: " . $length);
   header("Content-Type: " . $mime);
-  
-  $fp = fopen($filePath, 'rb');
-  fseek($fp, $start);
-  $buffer = 1024 * 8;
-  while (!feof($fp) && ($p = ftell($fp)) <= $end) {
-    if ($p + $buffer > $end) {
-      $buffer = $end - $p + 1;
+
+  $fp = @fopen($filePath, 'rb');
+  if ($fp) {
+    @fseek($fp, $start);
+    $bytesLeft = $length;
+    $bufferSize = 512 * 1024; // 512KB for smooth zero-lag delivery
+    while (!feof($fp) && $bytesLeft > 0) {
+      if (connection_aborted()) break;
+      $read = min($bufferSize, $bytesLeft);
+      $data = fread($fp, $read);
+      if ($data === false || $data === '') break;
+      echo $data;
+      flush();
+      $bytesLeft -= strlen($data);
     }
-    echo fread($fp, $buffer);
-    flush();
+    fclose($fp);
   }
-  fclose($fp);
+  exit;
 }
 
 if (isset($_GET['share'])) {
@@ -345,6 +369,14 @@ if ($api) {
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
       $postAction = $input['action'] ?? $_POST['action'] ?? '';
+
+      $isDemo = (!empty($_SESSION['auth_role']) && $_SESSION['auth_role'] === 'demo');
+      $writeActions = ['add_file', 'add_folder', 'upload', 'upload_url', 'write', 'rename', 'trash', 'delete_perm', 'empty_trash', 'restore_trash', 'encrypt_file', 'decrypt_file', 'unzip', 'zip_items', 'copy_items', 'move_items', 'toggle_auth', 'restore_version'];
+      
+      if ($isDemo && in_array($postAction, $writeActions)) {
+        echo json_encode(['success' => false, 'error' => 'Demo Mode: Read-only access. Modifications are disabled.']);
+        exit;
+      }
 
       switch ($postAction) {
         case 'add_file':
@@ -507,6 +539,14 @@ if ($api) {
             usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
           }
           echo json_encode(['success' => true, 'versions' => $versions]);
+          break;
+
+        case 'get_version_content':
+          $file = $input['file'] ?? '';
+          $version_name = $input['version_name'] ?? '';
+          $src = $baseDir . '/.file_version/' . basename($file) . '/' . $version_name;
+          if (!isValidPath($baseDir, $src) || !file_exists($src)) throw new Exception('Version file not found');
+          echo json_encode(['success' => true, 'content' => file_get_contents($src)]);
           break;
 
         case 'restore_version':
@@ -775,7 +815,7 @@ if ($api) {
           $meta = getMetadata();
           $files = [];
           $folders = [];
-          $items = array_diff(scandir($absPath), ['.', '..', '.drive_metadata.json', '.drive_trash_bin', '.drive_thumbnails']);
+          $items = array_diff(scandir($absPath), ['.', '..', '.drive_metadata.json', '.drive_trash_bin', '.drive_thumbnails', '.file_version', '.drive_config.json']);
           foreach ($items as $item) {
             $path = $absPath . '/' . $item;
             $stat = stat($path);
@@ -888,14 +928,23 @@ if ($api) {
           break;
 
         case 'recents':
-          $meta = getMetadata();
+          $all = !empty($_GET['all']);
           $recentFiles = [];
           
-          // Optimized Directory Scanner: Skip scanning massive or irrelevant system directories
-          $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS);
+          $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
           $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
-            $exclude = ['getid3', '.drive_trash_bin', '.drive_thumbnails', '.git', 'uploads', 'covers', 'brain'];
-            if ($current->isDir() && in_array($current->getFilename(), $exclude)) {
+            $pathname = str_replace('\\', '/', $current->getPathname());
+            $filename = $current->getFilename();
+            $exclude = ['getid3', '.drive_trash_bin', '.drive_thumbnails', '.file_version', '.drive_config.json', '.drive_metadata.json', '.git', 'uploads', 'covers', 'brain', '.tmp_db'];
+            
+            if ($current->isDir() && in_array($filename, $exclude)) {
+              return false;
+            }
+            if (strpos($pathname, '/.drive_thumbnails') !== false ||
+                strpos($pathname, '/.drive_trash_bin') !== false ||
+                strpos($pathname, '/.file_version') !== false ||
+                strpos($pathname, '/.git') !== false ||
+                in_array($filename, ['.drive_metadata.json', '.drive_config.json'])) {
               return false;
             }
             return true;
@@ -903,28 +952,51 @@ if ($api) {
           
           $iter = new RecursiveIteratorIterator($filter);
           foreach ($iter as $file) {
-            if ($file->isFile() && isAllowedExtension($file->getFilename())) {
-              $path = $file->getPathname();
+            $pathname = str_replace('\\', '/', $file->getPathname());
+            $filename = $file->getFilename();
+
+            if (strpos($pathname, '/.drive_thumbnails') !== false ||
+                strpos($pathname, '/.drive_trash_bin') !== false ||
+                strpos($pathname, '/.file_version') !== false ||
+                in_array($filename, ['.drive_metadata.json', '.drive_config.json'])) {
+              continue;
+            }
+
+            if ($file->isFile() && isAllowedExtension($filename)) {
+              $relPath = ltrim(str_replace(str_replace('\\', '/', $baseDir), '', $pathname), '/');
               $recentFiles[] = [
-                'name' => $file->getFilename(),
-                'path' => ltrim(str_replace($baseDir, '', $path), '/'),
+                'name' => $filename,
+                'path' => $relPath,
                 'mtime' => $file->getMTime(),
                 'size' => $file->getSize(),
                 'formatSize' => formatBytes($file->getSize()),
                 'ext' => strtolower($file->getExtension()),
-                'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+                'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp']),
+                'starred' => false
               ];
             }
           }
           usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-          echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, 15)]);
+          echo json_encode(['success' => true, 'recents' => $all ? $recentFiles : array_slice($recentFiles, 0, 15)]);
           break;
 
         case 'read':
           $file = $_GET['file'] ?? '';
           $full = $baseDir . '/' . $file;
           if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
-          echo json_encode(['success' => true, 'content' => file_get_contents($full)]);
+          $content = '';
+          $fp = @fopen($full, 'rb');
+          if ($fp) {
+            @flock($fp, LOCK_SH);
+            @fseek($fp, 0, SEEK_SET);
+            $size = filesize($full);
+            if ($size > 0) {
+              $content = fread($fp, $size);
+            }
+            @flock($fp, LOCK_UN);
+            fclose($fp);
+          }
+          echo json_encode(['success' => true, 'content' => $content], JSON_INVALID_UTF8_SUBSTITUTE);
           break;
 
         case 'properties':
@@ -1092,12 +1164,12 @@ if (isset($_GET['batch'])) {
     <meta property="og:description" content="A fast, minimal, and open-source file manager.">
     <meta property="og:image" content="data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%230b57d0' d='M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383'/%3E%3C/svg%3E">
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%230b57d0' d='M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383'/%3E%3C/svg%3E">
-    <link rel="manifest" href="?manifest=1">
     <meta name="theme-color" content="#0b57d0">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/5.1.0/diff.min.js"></script>
     <script>
       const IS_PROTECTED = <?php echo $config['protected'] ? 'true' : 'false'; ?>;
       const IS_AUTHED = <?php echo !empty($_SESSION['auth']) ? 'true' : 'false'; ?>;
-      if ('serviceWorker' in navigator) navigator.serviceWorker.register('?sw=1');
+      const IS_DEMO = <?php echo (!empty($_SESSION['auth_role']) && $_SESSION['auth_role'] === 'demo') ? 'true' : 'false'; ?>;
     </script>
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
@@ -1205,9 +1277,10 @@ if (isset($_GET['batch'])) {
       .sidebar { width: 256px; display: flex; flex-direction: column; padding: 16px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: left 0.3s ease; }
       .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 99; display: none; opacity: 0; transition: opacity 0.3s; }
       
-      .fab { height: 56px; border-radius: 16px; background-color: var(--theme-surface-container-low); color: var(--theme-on-surface); border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 500; cursor: pointer; box-shadow: 0 1px 2px 0 rgba(0,0,0,0.3); transition: box-shadow var(--transition), background-color var(--transition); width: fit-content; }
-      .fab:hover { box-shadow: 0 4px 8px rgba(0,0,0,0.15); background-color: var(--theme-surface-container-high); }
-      .fab .material-symbols-rounded { color: var(--theme-on-surface); }
+      /* Blue + New Button */
+      .fab { height: 56px; border-radius: 16px; background-color: #0b57d0; color: #ffffff; border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 500; cursor: pointer; box-shadow: 0 2px 6px rgba(11,87,208,0.4); transition: box-shadow var(--transition), filter var(--transition); width: fit-content; }
+      .fab:hover { box-shadow: 0 4px 12px rgba(11,87,208,0.6); filter: brightness(1.1); background-color: #0b57d0; }
+      .fab .material-symbols-rounded { color: #ffffff; }
       
       .nav-list { display: flex; flex-direction: column; gap: 4px; }
       .nav-item { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 20px; border-radius: 24px; color: var(--theme-on-surface-variant); cursor: pointer; font-size: 14px; font-weight: 500; transition: background-color var(--transition); }
@@ -1255,6 +1328,20 @@ if (isset($_GET['batch'])) {
       .item-card:hover .card-star, .item-card.starred .card-star { opacity: 1; }
       .item-card.starred .card-star { color: #f5b041; font-variation-settings: 'FILL' 1; }
       .card-star .material-symbols-rounded { color: inherit; }
+
+      /* Vertically center checkbox and star in List View */
+      .list-view .card-checkbox { top: 50%; transform: translateY(-50%); left: 8px; }
+      .list-view .card-star { top: 50%; transform: translateY(-50%); right: 8px; }
+
+      /* Top Progress Loading Bar */
+      #topLoadingBar { position: fixed; top: 0; left: 0; height: 3px; width: 0%; background: var(--theme-primary); z-index: 99999; transition: width 0.2s ease, opacity 0.3s ease; opacity: 0; }
+
+      /* Diff Viewer Styles */
+      .diff-viewer-modal { width: 95%; max-width: 900px; height: 85vh; max-height: 85vh; padding: 16px; border-radius: 16px; display: flex; flex-direction: column; }
+      .diff-body { flex: 1; overflow: auto; background: var(--theme-surface); border: 1px solid var(--theme-outline-variant); border-radius: 8px; font-family: monospace; font-size: 13px; padding: 8px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+      .diff-line-add { background-color: rgba(46, 125, 50, 0.2); color: #2e7d32; display: block; width: 100%; }
+      .diff-line-del { background-color: rgba(198, 40, 40, 0.2); color: #c62828; display: block; width: 100%; }
+      .diff-line-ctx { color: var(--theme-on-surface); display: block; width: 100%; }
       
       .grid-view .item-card { height: 64px; padding: 0 40px; flex-direction: row; align-items: center; gap: 12px; }
       .grid-view .file-card { height: 200px; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
@@ -1268,9 +1355,13 @@ if (isset($_GET['batch'])) {
       .list-view .item-card:hover { background-color: var(--theme-surface-container-high); border-color: var(--theme-primary); margin: 0; }
       .list-view .item-card.selected { background-color: var(--theme-secondary-container); border-color: var(--theme-primary); color: var(--theme-on-secondary-container); margin: 0; }
       
-      .item-icon { color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; }
+      .item-icon { color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex-shrink: 0; }
       .item-icon .material-symbols-rounded { color: inherit; }
       .item-card.selected .item-icon { color: var(--theme-primary); }
+      
+      /* List View Image Thumbnail Previews */
+      .list-view .list-thumb-preview { width: 36px; height: 36px; border-radius: 6px; overflow: hidden; background-color: var(--theme-surface-container); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+      .list-view .list-thumb-preview img { width: 100%; height: 100%; object-fit: cover; }
       .folder-icon { color: var(--theme-on-surface-variant); font-variation-settings: 'FILL' 1; }
       .folder-icon .material-symbols-rounded { color: inherit; }
       .item-card.selected .folder-icon .material-symbols-rounded { color: var(--theme-primary); }
@@ -1290,7 +1381,7 @@ if (isset($_GET['batch'])) {
       .menu-item.active .material-symbols-rounded { color: var(--theme-on-secondary-container); }
       .menu-divider { height: 1px; background-color: var(--theme-outline-variant); margin: 4px 0; }
       
-      .modal-overlay, .login-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+      .modal-overlay, .login-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: none; align-items: center; justify-content: center; }
       .login-overlay { z-index: 9999; background: var(--theme-surface); }
       .modal { background-color: var(--theme-surface-container-low); border-radius: 28px; width: 90%; max-width: 400px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.14); }
       .modal-title { font-family: var(--font-title); font-size: 24px; color: var(--theme-on-surface); }
@@ -1392,12 +1483,14 @@ if (isset($_GET['batch'])) {
     </style>
   </head>
   <body data-theme="light">
+    <div id="topLoadingBar"></div>
 
     <header>
       <button class="icon-btn menu-btn" onclick="app.toggleSidebar()"><span class="material-symbols-rounded">menu</span></button>
       <div class="logo-container" onclick="app.navigate('')">
         <div class="logo-img"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-cloud-fill" viewBox="0 0 16 16"><path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383"/></svg></div>
         <div class="logo-text">PHPDrive</div>
+        <span id="demoBadge" style="display: none; background: #f59e0b; color: #000; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 12px; margin-left: 8px;">Demo</span>
       </div>
       <div class="search-bar" id="topSearchBar">
         <button class="icon-btn mobile-only" onclick="app.toggleMobileSearch(false)" id="closeSearchBtn" style="display: none;"><span class="material-symbols-rounded">arrow_back</span></button>
@@ -1421,6 +1514,9 @@ if (isset($_GET['batch'])) {
           <a class="nav-item active" id="navHome" onclick="app.setViewMode('home')">
             <span class="material-symbols-rounded">home</span> Home
           </a>
+          <a class="nav-item" id="navRecents" onclick="app.setViewMode('recents')">
+            <span class="material-symbols-rounded">schedule</span> Recents
+          </a>
           <a class="nav-item" id="navStarred" onclick="app.setViewMode('starred')">
             <span class="material-symbols-rounded">star</span> Starred
           </a>
@@ -1431,9 +1527,6 @@ if (isset($_GET['batch'])) {
             <span class="material-symbols-rounded">delete</span> Trash
           </a>
           <div class="menu-divider" style="margin: 8px 16px;"></div>
-          <a class="nav-item" id="navInstall" onclick="app.installApp()">
-            <span class="material-symbols-rounded">install_mobile</span> Install App
-          </a>
           <a class="nav-item" onclick="app.togglePasswordProtection()">
             <span class="material-symbols-rounded" id="authIcon">lock_open</span> <span id="authText">Security: OFF</span>
           </a>
@@ -1475,7 +1568,10 @@ if (isset($_GET['batch'])) {
 
         <div class="file-list-container" id="fileListContainer" onclick="app.clearSelection(event)">
           <div class="recents-container" id="recentsSection" style="display: none;">
-            <div class="section-title" style="margin: 0 0 8px 0;">Recent files</div>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+              <div class="section-title" style="margin: 0;">Recent files</div>
+              <button class="btn btn-text" style="height: 28px; font-size: 12px; padding: 0 8px;" onclick="app.setViewMode('recents')">See all</button>
+            </div>
             <div class="recents-tray" id="recentsTray"></div>
           </div>
           <div class="section-title hidden" id="foldersTitle">Folders</div>
@@ -1523,6 +1619,20 @@ if (isset($_GET['batch'])) {
 
     <div class="context-menu" id="contextMenu"></div>
 
+    <div class="modal-overlay" id="diffModalOverlay" style="z-index: 3600; display: none;" onclick="if(event.target===this) app.closeDiffModal()">
+      <div class="modal diff-viewer-modal">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div class="modal-title" id="diffModalTitle" style="font-size: 18px;">File Comparison</div>
+          <button class="icon-btn" onclick="app.closeDiffModal()"><span class="material-symbols-rounded">close</span></button>
+        </div>
+        <div style="display: flex; gap: 12px; font-size: 12px; margin-bottom: 8px;">
+          <span style="color: #2e7d32; font-weight: bold;">+ Added</span>
+          <span style="color: #c62828; font-weight: bold;">- Removed</span>
+        </div>
+        <div class="diff-body" id="diffContentArea"></div>
+      </div>
+    </div>
+
     <div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this) app.closeModal()">
       <div class="modal">
         <div class="modal-title" id="modalTitle">Title</div>
@@ -1544,8 +1654,8 @@ if (isset($_GET['batch'])) {
 
     <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
     <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) app.closeMedia()">
-      <div class="modal" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
-        <button class="icon-btn" onclick="app.closeMedia()" style="position: absolute; top: 16px; right: 16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
+      <div class="modal" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; overflow: visible; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
+        <button class="icon-btn" onclick="app.closeMedia()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
         <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
       </div>
     </div>
@@ -1598,7 +1708,11 @@ if (isset($_GET['batch'])) {
     <div class="login-overlay" id="loginOverlay">
       <div class="modal">
         <div class="modal-title">Enter Password</div>
-        <input type="password" class="modal-input" id="loginInput" placeholder="Password" style="margin-top:8px;">
+        <input type="password" class="modal-input" id="loginInput" placeholder="Password" style="margin-top:8px;" onkeydown="if(event.key==='Enter') app.login()">
+        <div style="font-size: 12px; color: var(--theme-on-surface-variant); margin-top: 4px; display: flex; justify-content: space-between;">
+          <span><strong>admin</strong>: Full Access</span>
+          <span><strong>demo</strong>: Read-Only</span>
+        </div>
         <div class="modal-actions">
           <button class="btn btn-filled" onclick="app.login()">Login</button>
         </div>
@@ -1630,22 +1744,22 @@ if (isset($_GET['batch'])) {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/clike/clike.min.js"></script>
 
     <script>
-      window.deferredPrompt = null;
-      window.addEventListener('beforeinstallprompt', (e) => {
-        e.preventDefault();
-        window.deferredPrompt = e;
-        const btn = document.getElementById('navInstall');
-        if (btn) btn.style.display = 'flex';
-      });
-
       class FileManager {
         constructor() {
-          this.currentPath = new URLSearchParams(window.location.search).get('path') || '';
+          const urlParams = new URLSearchParams(window.location.search);
+          this.initialEditFile = urlParams.get('edit') || null;
+          let pathParam = urlParams.get('path') || '';
+          
+          if (this.initialEditFile && !pathParam && this.initialEditFile.includes('/')) {
+            pathParam = this.initialEditFile.substring(0, this.initialEditFile.lastIndexOf('/'));
+          }
+
+          this.currentPath = pathParam;
           this.viewMode = localStorage.getItem('viewMode') || 'list';
           this.theme = localStorage.getItem('theme') || 'light';
           this.sortBy = localStorage.getItem('sortBy') || 'name';
           this.sortDesc = localStorage.getItem('sortDesc') === 'true';
-          this.currentViewMode = 'home';
+          this.currentViewMode = urlParams.get('view') || 'home';
           this.currentFilter = 'all';
           
           this.selectedItems = new Set();
@@ -1659,8 +1773,6 @@ if (isset($_GET['batch'])) {
           this.draggedItemName = null;
           this.clipboard = null;
           this.isSelectMode = false;
-          this.initialEditFile = new URLSearchParams(window.location.search).get('edit');
-          this.deferredPrompt = null;
           this.visibleFoldersCount = 25;
           this.visibleFilesCount = 25;
           this.filteredFolders = [];
@@ -1682,11 +1794,37 @@ if (isset($_GET['batch'])) {
           const tIcon = document.getElementById('themeIconSide');
           if (tIcon) tIcon.textContent = this.theme === 'dark' ? 'light_mode' : 'dark_mode';
           this.bindEvents();
-          this.loadDirectory(this.currentPath);
+          this.setViewMode(this.currentViewMode, false);
           
-          window.addEventListener('popstate', () => {
-            this.currentPath = new URLSearchParams(window.location.search).get('path') || '';
-            this.loadDirectory(this.currentPath, false);
+          window.addEventListener('popstate', (e) => {
+            const params = new URLSearchParams(window.location.search);
+            const path = params.get('path') || '';
+            const view = params.get('view') || 'home';
+            const edit = params.get('edit');
+
+            if (edit) {
+              if (this.currentEditFile !== edit) {
+                const fileName = edit.split('/').pop();
+                const ext = fileName.split('.').pop().toLowerCase();
+                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext);
+                const target = (this.data.files && this.data.files.find(f => f.path === edit || f.name === edit || f.name === fileName)) || { 
+                  path: edit, 
+                  name: fileName, 
+                  ext: ext,
+                  isImage: isImage
+                };
+                this.openPreviewOrEditor(target, false);
+              }
+            } else {
+              if (document.getElementById('editorOverlay').style.display === 'flex') this.closeEditor(false);
+              if (document.getElementById('imageOverlay').style.display === 'flex') this.closeImage(false);
+              if (document.getElementById('mediaOverlay').style.display === 'flex') this.closeMedia(false);
+            }
+
+            if (this.currentPath !== path || this.currentViewMode !== view) {
+              this.currentPath = path;
+              this.setViewMode(view, false);
+            }
           });
         }
 
@@ -1707,9 +1845,13 @@ if (isset($_GET['batch'])) {
         updateAuthUI() {
           const icon = document.getElementById('authIcon');
           const text = document.getElementById('authText');
-          if(icon && text) {
+          const demoBadge = document.getElementById('demoBadge');
+          if (icon && text) {
             icon.textContent = IS_PROTECTED ? 'lock' : 'lock_open';
-            text.textContent = IS_PROTECTED ? 'Security: ON' : 'Security: OFF';
+            text.textContent = IS_PROTECTED ? (IS_DEMO ? 'Security: Demo' : 'Security: ON') : 'Security: OFF';
+          }
+          if (demoBadge) {
+            demoBadge.style.display = IS_DEMO ? 'inline-block' : 'none';
           }
         }
 
@@ -1888,16 +2030,18 @@ if (isset($_GET['batch'])) {
           }
         }
 
-        async installApp() {
-          if (window.deferredPrompt) {
-            window.deferredPrompt.prompt();
-            const { outcome } = await window.deferredPrompt.userChoice;
-            if (outcome === 'accepted') {
-              document.getElementById('navInstall').style.display = 'none';
-            }
-            window.deferredPrompt = null;
+        setLoading(loading) {
+          const bar = document.getElementById('topLoadingBar');
+          if (!bar) return;
+          if (loading) {
+            bar.style.opacity = '1';
+            bar.style.width = '70%';
           } else {
-            this.showToast('Please open your browser menu (3 dots) and tap "Install App" or "Add to Home screen".');
+            bar.style.width = '100%';
+            setTimeout(() => {
+              bar.style.opacity = '0';
+              setTimeout(() => { bar.style.width = '0%'; }, 300);
+            }, 150);
           }
         }
 
@@ -1913,6 +2057,7 @@ if (isset($_GET['batch'])) {
             }
           }
           try {
+            this.setLoading(true);
             const res = await fetch(url, options);
             const text = await res.text();
             let data;
@@ -1933,8 +2078,12 @@ if (isset($_GET['batch'])) {
             }
             return data;
           } catch (err) {
-            this.showToast(err.message);
+            if (err.name !== 'AbortError') {
+              this.showToast(err.message);
+            }
             return null;
+          } finally {
+            this.setLoading(false);
           }
         }
 
@@ -1947,27 +2096,39 @@ if (isset($_GET['batch'])) {
           
           if (pushState) {
             const url = path ? `?path=${encodeURIComponent(path).replace(/%2F/g, '/')}` : window.location.pathname;
-            window.history.pushState({ path }, '', url);
+            window.history.pushState({ path, view: 'home' }, '', url);
           }
           this.clearSelection(null, true);
-          this.setViewMode('home');
+          this.setViewMode('home', false);
         }
 
-        async setViewMode(mode) {
+        async setViewMode(mode, pushState = true) {
           this.currentViewMode = mode;
           this.clearSelection(null, true);
           
+          if (pushState) {
+            let url = window.location.pathname;
+            const params = new URLSearchParams();
+            if (this.currentPath && mode === 'home') params.set('path', this.currentPath);
+            if (mode !== 'home') params.set('view', mode);
+            const qs = params.toString();
+            if (qs) url += '?' + qs;
+            window.history.pushState({ path: this.currentPath, view: mode }, '', url);
+          }
+          
           const navHome = document.getElementById('navHome');
+          const navRecents = document.getElementById('navRecents');
           const navStarred = document.getElementById('navStarred');
           const navHistory = document.getElementById('navHistory');
           const navTrash = document.getElementById('navTrash');
           
           if (navHome) navHome.classList.toggle('active', mode === 'home');
+          if (navRecents) navRecents.classList.toggle('active', mode === 'recents');
           if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
           if (navHistory) navHistory.classList.toggle('active', mode === 'history');
           if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
           
-          document.getElementById('chipsContainer').style.display = mode === 'home' ? 'flex' : 'none';
+          document.getElementById('chipsContainer').style.display = (mode === 'home' || mode === 'recents') ? 'flex' : 'none';
           document.getElementById('recentsSection').style.display = mode === 'home' ? 'block' : 'none';
           const trashActionsEl = document.getElementById('trashActions');
           if (trashActionsEl) trashActionsEl.style.display = mode === 'trash' ? 'flex' : 'none';
@@ -1994,22 +2155,28 @@ if (isset($_GET['batch'])) {
               this.loadRecents();
               
               if (this.initialEditFile) {
-                // Normalize initialEditFile to deeply support both simple basenames and full relative paths
-                let targetPath = this.initialEditFile;
-                if (!targetPath.includes('/') && this.currentPath) {
-                  targetPath = this.currentPath + '/' + targetPath;
-                }
-                
-                // Failsafe creation if it's out of pagination chunks
-                const target = this.data.files.find(f => f.path === targetPath || f.path === this.initialEditFile || f.name === this.initialEditFile) || { 
-                  path: targetPath, 
-                  name: targetPath.split('/').pop(), 
-                  ext: targetPath.split('.').pop().toLowerCase(),
-                  isImage: ['png','jpg','jpeg','gif','svg'].includes(targetPath.split('.').pop().toLowerCase()) 
-                };
-                this.openPreviewOrEditor(target);
+                const fileToOpen = this.initialEditFile;
                 this.initialEditFile = null;
+
+                const fileName = fileToOpen.split('/').pop();
+                const ext = fileName.split('.').pop().toLowerCase();
+                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext);
+
+                const target = (this.data.files && this.data.files.find(f => f.path === fileToOpen || f.name === fileToOpen || f.name === fileName)) || { 
+                  path: fileToOpen, 
+                  name: fileName, 
+                  ext: ext,
+                  isImage: isImage
+                };
+                
+                this.openPreviewOrEditor(target, false);
               }
+            }
+          } else if (this.currentViewMode === 'recents') {
+            const data = await this.fetchAPI('recents&all=1');
+            if (data) {
+              this.data = { folders: [], files: data.recents, breadcrumbs: [] };
+              this.render();
             }
           } else if (this.currentViewMode === 'starred') {
             const data = await this.fetchAPI('list_starred');
@@ -2212,7 +2379,12 @@ if (isset($_GET['batch'])) {
           
           const root = document.createElement('div');
           root.className = 'breadcrumb-item';
-          root.textContent = this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'history' ? 'File Versions History' : 'Drive'));
+          let rootLabel = 'Drive';
+          if (this.currentViewMode === 'trash') rootLabel = 'Trash';
+          else if (this.currentViewMode === 'recents') rootLabel = 'Recent Files';
+          else if (this.currentViewMode === 'starred') rootLabel = 'Starred';
+          else if (this.currentViewMode === 'history') rootLabel = 'File Versions History';
+          root.textContent = rootLabel;
           root.onclick = () => this.navigate('');
           container.appendChild(root);
 
@@ -2277,9 +2449,16 @@ if (isset($_GET['batch'])) {
             el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
             const date = new Date(item.mtime * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
             const metaStr = isFolder ? `${date}` : `${item.formatSize} • ${date}`;
+            
+            let iconHtml = `<div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>`;
+            if (!isFolder && item.isImage) {
+              const thumbUrl = `?api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+              iconHtml = `<div class="item-icon list-thumb-preview"><img src="${thumbUrl}" loading="lazy" alt="${item.name}"></div>`;
+            }
+
             el.innerHTML = `
               ${checkboxHtml}
-              <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
+              ${iconHtml}
               <div class="item-details">
                 <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
                 <div class="item-sub-meta">${metaStr}</div>
@@ -2828,11 +3007,14 @@ if (isset($_GET['batch'])) {
               const d = new Date(v.mtime * 1000).toLocaleString();
               html += `
                 <div class="version-item" style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant);">
-                  <div style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 12px;">
+                  <div style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 8px;">
                     <div style="font-weight:600;font-size:14px;color:var(--theme-on-surface)">${d}</div>
                     <div style="font-size:12px;color:var(--theme-on-surface-variant)">Size: ${v.size}</div>
                   </div>
-                  <button class="btn btn-filled" style="height:32px;font-size:12px;padding:0 12px;" onclick="app.restoreVersion('${path}', '${v.name}')">Restore</button>
+                  <div style="display: flex; gap: 4px;">
+                    <button class="btn btn-text" style="height:32px;font-size:12px;padding:0 8px;" onclick="app.showDiffModal('${path}', '${v.name}')">Diff</button>
+                    <button class="btn btn-filled" style="height:32px;font-size:12px;padding:0 10px;" onclick="app.restoreVersion('${path}', '${v.name}')">Restore</button>
+                  </div>
                 </div>`;
             });
             html += `</div>`;
@@ -2855,6 +3037,44 @@ if (isset($_GET['batch'])) {
           } else {
             this.showToast('No version history found for this file.');
           }
+        }
+
+        async showDiffModal(currentFilePath, versionName) {
+          this.setLoading(true);
+          const currentRes = await this.fetchAPI(`read&file=${encodeURIComponent(currentFilePath)}`);
+          const versionRes = await this.fetchAPI('get_version_content', 'POST', { action: 'get_version_content', file: currentFilePath, version_name: versionName });
+          this.setLoading(false);
+
+          if (!currentRes || !versionRes) {
+            this.showToast('Could not load files for comparison');
+            return;
+          }
+
+          const overlay = document.getElementById('diffModalOverlay');
+          const title = document.getElementById('diffModalTitle');
+          const area = document.getElementById('diffContentArea');
+          
+          title.textContent = `Diff: ${basename(currentFilePath)} (Current vs ${versionName})`;
+          area.innerHTML = '';
+
+          if (typeof Diff !== 'undefined') {
+            const diff = Diff.diffLines(versionRes.content || '', currentRes.content || '');
+            diff.forEach(part => {
+              const span = document.createElement('span');
+              span.className = part.added ? 'diff-line-add' : part.removed ? 'diff-line-del' : 'diff-line-ctx';
+              span.textContent = (part.added ? '+ ' : part.removed ? '- ' : '  ') + part.value;
+              area.appendChild(span);
+            });
+          } else {
+            area.textContent = "Diff library unavailable.";
+          }
+
+          overlay.style.display = 'flex';
+        }
+
+        closeDiffModal() {
+          document.getElementById('diffModalOverlay').style.display = 'none';
+          document.getElementById('diffContentArea').innerHTML = '';
         }
 
         async restoreVersion(path, versionName) {
@@ -3045,27 +3265,37 @@ if (isset($_GET['batch'])) {
           document.title = `${folderName} (${totalItems} items) - PHPDrive`;
         }
 
-        async openPreviewOrEditor(item) {
+        async openPreviewOrEditor(item, pushHistory = true) {
           if (item.ext === 'zip') {
             this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
             return;
           }
           this.currentEditFile = item.path;
           
-          let qs = '?';
-          if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}&`;
-          qs += `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-          window.history.pushState({}, '', qs);
+          const params = new URLSearchParams();
+          if (this.currentPath) params.set('path', this.currentPath);
+          params.set('edit', item.path);
+          if (this.currentViewMode !== 'home') params.set('view', this.currentViewMode);
+          
+          const targetUrl = '?' + params.toString();
+          if (pushHistory) {
+            window.history.pushState({ path: this.currentPath, view: this.currentViewMode, edit: item.path }, '', targetUrl);
+          } else {
+            window.history.replaceState({ path: this.currentPath, view: this.currentViewMode, edit: item.path }, '', targetUrl);
+          }
           
           const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
           document.title = `${item.name} - PHPDrive`;
 
-          if (item.isImage) {
+          const videoExts = ['mp4', 'webm', 'mkv', 'm4v', 'mov', 'avi', 'ts'];
+          const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'opus'];
+
+          if (item.isImage || ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(item.ext)) {
             const imageOverlay = document.getElementById('imageOverlay');
             const imageContent = document.getElementById('imageModalContent');
             imageOverlay.style.display = 'flex';
             imageContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">`;
-          } else if (['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
+          } else if ([...videoExts, ...audioExts, 'pdf'].includes(item.ext)) {
             const mediaOverlay = document.getElementById('mediaOverlay');
             const mediaContent = document.getElementById('mediaModalContent');
             const mediaContainer = document.getElementById('mediaModalContainer');
@@ -3082,12 +3312,19 @@ if (isset($_GET['batch'])) {
                   </div>
                   <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
                 </div>`;
-            } else if (['mp4','webm'].includes(item.ext)) {
-              mediaContainer.style.maxWidth = '550px';
-              mediaContainer.style.width = '90%';
-              mediaContainer.style.padding = '24px';
-              mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
-            } else if (['mp3','wav','ogg'].includes(item.ext)) {
+            } else if (videoExts.includes(item.ext)) {
+              mediaContainer.style.maxWidth = '960px';
+              mediaContainer.style.width = '95%';
+              mediaContainer.style.padding = '12px';
+              mediaContent.innerHTML = `
+                <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                  <span style="font-size: 13px; font-weight: 500; color: var(--theme-on-surface); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;">${item.name}</span>
+                  <a href="${streamUrl}" target="_blank" class="btn btn-text" style="font-size: 12px; height: 28px; text-decoration: none; display: flex; align-items: center; gap: 4px; padding: 0 8px;">
+                    <span class="material-symbols-rounded" style="font-size: 16px;">open_in_new</span> External / Native Tab
+                  </a>
+                </div>
+                <video src="${streamUrl}" controls autoplay preload="metadata" playsinline style="max-width: 100%; max-height: 75vh; width: 100%; border-radius: 8px; background: #000; outline: none;"></video>`;
+            } else if (audioExts.includes(item.ext)) {
               mediaContainer.style.maxWidth = '550px';
               mediaContainer.style.width = '90%';
               mediaContainer.style.padding = '24px';
@@ -3095,7 +3332,7 @@ if (isset($_GET['batch'])) {
                 <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%;">
                   <div class="media-art" style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
                   <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
-                  <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
+                  <audio src="${streamUrl}" controls autoplay preload="metadata" style="width: 100%; max-width: 300px; outline: none;"></audio>
                 </div>`;
             }
             mediaOverlay.style.display = 'flex';
@@ -3119,6 +3356,9 @@ if (isset($_GET['batch'])) {
             this.updateEditorWrapUI();
             const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
             if (res && res.success) {
+              const contentLength = res.content ? res.content.length : 0;
+              const isGigantic = contentLength > 300000; // Disable heavy features on >300KB files
+
               if (window.innerWidth <= 768) {
                 mobileContainer.style.display = 'flex';
                 const textEl = document.getElementById('mobileTextarea');
@@ -3126,8 +3366,9 @@ if (isset($_GET['batch'])) {
               } else {
                 desktopContainer.style.display = 'block';
                 let mode = 'text/plain';
-                // Optimization: disable expensive parsing engines on files >= 2MB to keep 60fps interaction responsiveness
-                if (res.content && res.content.length < 2 * 1024 * 1024) {
+                
+                // Only tokenize and highlight on lightweight documents to prevent UI freeze
+                if (!isGigantic) {
                   if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
                   if (item.ext === 'html') mode = 'text/html';
                   if (item.ext === 'css') mode = 'text/css';
@@ -3139,21 +3380,23 @@ if (isset($_GET['batch'])) {
                   this.editor = null;
                 }
 
+                // Extreme optimization for millions of characters
                 this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
                   lineNumbers: true,
                   theme: this.theme === 'dark' ? 'material-darker' : 'default',
                   mode: mode,
                   indentUnit: 2,
                   tabSize: 2,
-                  lineWrapping: this.editorWrap,
+                  lineWrapping: isGigantic ? false : this.editorWrap,
                   viewportMargin: 10,
+                  maxHighlightLength: 100,
+                  flattenSpans: true,
                   extraKeys: {
                     "Ctrl-F": () => this.editorFind(),
                     "Cmd-F": () => this.editorFind()
                   }
                 });
                 
-                // Batch content population under an operation wrapper to speed up rendering
                 this.editor.operation(() => {
                   this.editor.setValue(res.content);
                 });
@@ -3163,7 +3406,7 @@ if (isset($_GET['batch'])) {
           }
         }
         
-        closeImage() {
+        closeImage(syncHistory = true) {
           const overlay = document.getElementById('imageOverlay');
           if (overlay) {
             overlay.style.display = 'none';
@@ -3171,11 +3414,13 @@ if (isset($_GET['batch'])) {
           }
           this.currentEditFile = null;
           this.restoreDocumentTitle();
-          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
-          window.history.pushState({}, '', qs);
+          if (syncHistory) {
+            const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+            window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
+          }
         }
 
-        closeMedia() {
+        closeMedia(syncHistory = true) {
           const overlay = document.getElementById('mediaOverlay');
           if (overlay) {
             overlay.style.display = 'none';
@@ -3183,8 +3428,10 @@ if (isset($_GET['batch'])) {
           }
           this.currentEditFile = null;
           this.restoreDocumentTitle();
-          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
-          window.history.pushState({}, '', qs);
+          if (syncHistory) {
+            const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+            window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
+          }
         }
 
         insertMobileChar(char) {
@@ -3369,7 +3616,7 @@ if (isset($_GET['batch'])) {
           }
         }
 
-        closeEditor() {
+        closeEditor(syncHistory = true) {
           this.closeFindReplace();
           document.getElementById('editorOverlay').style.display = 'none';
           document.getElementById('mediaViewerContainer').innerHTML = '';
@@ -3380,8 +3627,10 @@ if (isset($_GET['batch'])) {
           }
           this.restoreDocumentTitle();
           
-          const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
-          window.history.pushState({}, '', qs);
+          if (syncHistory) {
+            const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
+            window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
+          }
         }
 
         async saveFile() {
