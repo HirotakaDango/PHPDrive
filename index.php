@@ -1602,6 +1602,8 @@ if (isset($_GET['batch'])) {
     </div>
 
     <div class="floating-menu" id="moreMenu">
+      <div class="menu-item" onclick="app.refresh()"><span class="material-symbols-rounded">refresh</span>Refresh</div>
+      <div class="menu-divider"></div>
       <div class="menu-item" onclick="app.toggleSelectMode()"><span class="material-symbols-rounded">checklist</span>Select</div>
       <div class="menu-item" onclick="app.selectAll()"><span class="material-symbols-rounded">done_all</span>Select all</div>
       <div class="menu-item" onclick="app.clearSelection(null, true)"><span class="material-symbols-rounded">deselect</span>Unselect all</div>
@@ -1784,17 +1786,18 @@ if (isset($_GET['batch'])) {
         }
 
         init() {
+          document.body.setAttribute('data-theme', this.theme);
+          const tIcon = document.getElementById('themeIconSide');
+          if (tIcon) tIcon.textContent = this.theme === 'dark' ? 'light_mode' : 'dark_mode';
+
           if (IS_PROTECTED && !IS_AUTHED) {
             document.getElementById('loginOverlay').style.display = 'flex';
             return;
           }
           this.updateAuthUI();
-          document.body.setAttribute('data-theme', this.theme);
           this.updateViewIcon();
-          const tIcon = document.getElementById('themeIconSide');
-          if (tIcon) tIcon.textContent = this.theme === 'dark' ? 'light_mode' : 'dark_mode';
           this.bindEvents();
-          this.setViewMode(this.currentViewMode, false);
+          this.loadDirectory(this.currentPath);
           
           window.addEventListener('popstate', (e) => {
             const params = new URLSearchParams(window.location.search);
@@ -1999,6 +2002,51 @@ if (isset($_GET['batch'])) {
 
           document.getElementById('searchInput').addEventListener('input', (e) => {
             this.handleSearchInput(e.target.value);
+          });
+
+          // Disable default browser context menu & show custom New Menu on empty space
+          document.addEventListener('contextmenu', (e) => {
+            if (e.target.closest('input, textarea, .CodeMirror, .CodeMirror *')) return;
+            e.preventDefault();
+            if (!e.target.closest('.item-card') && !e.target.closest('.recent-card')) {
+              this.showNewMenuAt(e.clientX, e.clientY);
+            }
+          });
+
+          // Touch-and-hold (long-press) on empty canvas area
+          const fileContainer = document.getElementById('fileListContainer');
+          let bgTouchTimer = null;
+          let bgStartX = 0, bgStartY = 0;
+          let isBgLongPress = false;
+
+          fileContainer.addEventListener('touchstart', (e) => {
+            if (e.target.closest('.item-card') || e.target.closest('.recent-card') || e.target.closest('button, input')) return;
+            isBgLongPress = false;
+            bgStartX = e.touches[0].clientX;
+            bgStartY = e.touches[0].clientY;
+
+            bgTouchTimer = setTimeout(() => {
+              isBgLongPress = true;
+              if (navigator.vibrate) navigator.vibrate(50);
+              this.showNewMenuAt(bgStartX, bgStartY);
+            }, 500);
+          }, { passive: true });
+
+          fileContainer.addEventListener('touchmove', (e) => {
+            if (!bgTouchTimer) return;
+            if (Math.abs(e.touches[0].clientX - bgStartX) > 10 || Math.abs(e.touches[0].clientY - bgStartY) > 10) {
+              clearTimeout(bgTouchTimer);
+              bgTouchTimer = null;
+            }
+          }, { passive: true });
+
+          fileContainer.addEventListener('touchend', (e) => {
+            clearTimeout(bgTouchTimer);
+            bgTouchTimer = null;
+            if (isBgLongPress) {
+              if (e.cancelable) e.preventDefault();
+              e.stopPropagation();
+            }
           });
 
           document.addEventListener('keydown', (e) => {
@@ -2748,6 +2796,34 @@ if (isset($_GET['batch'])) {
               menu.style.right = 'auto';
             }
           }
+        }
+
+        showNewMenuAt(x, y) {
+          const menu = document.getElementById('newMenu');
+          document.getElementById('moreMenu').style.display = 'none';
+          document.getElementById('sortMenu').style.display = 'none';
+          document.getElementById('contextMenu').style.display = 'none';
+          
+          menu.style.display = 'flex';
+          menu.style.position = 'fixed';
+          menu.style.bottom = 'auto';
+          menu.style.right = 'auto';
+
+          const rect = menu.getBoundingClientRect();
+          let posX = x;
+          let posY = y;
+          if (posX + rect.width > window.innerWidth - 8) posX = window.innerWidth - rect.width - 8;
+          if (posX < 8) posX = 8;
+          if (posY + rect.height > window.innerHeight - 8) posY = window.innerHeight - rect.height - 8;
+          if (posY < 8) posY = 8;
+
+          menu.style.left = `${posX}px`;
+          menu.style.top = `${posY}px`;
+        }
+
+        refresh() {
+          this.showToast('Refreshing...');
+          this.loadDirectory(this.currentPath);
         }
 
         showSortMenu(e) {
