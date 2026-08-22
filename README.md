@@ -1,6 +1,6 @@
 # PHPDrive
 
-<img width="1366" height="768" alt="PHPDrive Interface" src="https://github.com/user-attachments/assets/7f146c96-a8eb-4086-b08d-5a3d9ef70e53" />
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/ed0ea30b-3d99-4b03-8a94-ecfd78118917" />
 
 A fast, minimal, and open-source cloud file manager and workspace contained entirely in a **single PHP file**.
 
