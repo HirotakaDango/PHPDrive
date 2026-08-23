@@ -255,8 +255,21 @@ if (isset($_GET['share'])) {
   if (isset($meta['shares'][$token])) {
     $relFile = $meta['shares'][$token];
     $fullFile = $baseDir . '/' . $relFile;
-    if (file_exists($fullFile) && isAllowedExtension($fullFile)) {
-      streamFileRange($fullFile);
+    if (file_exists($fullFile)) {
+      // Grant read-only access for this session if password protection is active
+      if (empty($_SESSION['auth'])) {
+        $_SESSION['auth'] = true;
+        $_SESSION['auth_role'] = 'demo';
+      }
+
+      $encodedPath = str_replace('%2F', '/', rawurlencode($relFile));
+      if (is_dir($fullFile)) {
+        header('Location: ?path=' . $encodedPath);
+      } else {
+        $parent = dirname($relFile);
+        $parentParam = ($parent === '.' || $parent === '') ? '' : 'path=' . str_replace('%2F', '/', rawurlencode($parent)) . '&';
+        header('Location: ?' . $parentParam . 'edit=' . $encodedPath);
+      }
       exit;
     }
   }
@@ -2908,6 +2921,7 @@ if (isset($_GET['batch'])) {
             if (isFolder) {
               addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
               addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+              addMenuItem('share', 'Public Share Link', () => this.shareFile(item.path));
               addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
             } else if (item.is_version) {
               addMenuItem('history', 'Rollback to this Version', () => this.restoreVersion(item.original_file, item.version_name));
@@ -3158,12 +3172,14 @@ if (isset($_GET['batch'])) {
           const overlay = document.getElementById('diffModalOverlay');
           const title = document.getElementById('diffModalTitle');
           const area = document.getElementById('diffContentArea');
+          const fileName = currentFilePath.split('/').pop();
           
-          title.textContent = `Diff: ${basename(currentFilePath)} (Current vs ${versionName})`;
+          title.textContent = `Diff: ${fileName} (Current vs ${versionName})`;
           area.innerHTML = '';
 
-          if (typeof Diff !== 'undefined') {
-            const diff = Diff.diffLines(versionRes.content || '', currentRes.content || '');
+          const diffLib = (typeof Diff !== 'undefined' && Diff.diffLines) ? Diff : ((typeof JsDiff !== 'undefined' && JsDiff.diffLines) ? JsDiff : null);
+          if (diffLib) {
+            const diff = diffLib.diffLines(versionRes.content || '', currentRes.content || '');
             diff.forEach(part => {
               const span = document.createElement('span');
               span.className = part.added ? 'diff-line-add' : part.removed ? 'diff-line-del' : 'diff-line-ctx';
@@ -3171,7 +3187,7 @@ if (isset($_GET['batch'])) {
               area.appendChild(span);
             });
           } else {
-            area.textContent = "Diff library unavailable.";
+            area.textContent = 'Diff library unavailable.';
           }
 
           overlay.style.display = 'flex';
