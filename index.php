@@ -309,7 +309,7 @@ if ($api) {
     }
     
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-    $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
+    $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif']);
     
     if ($ext === 'svg') {
       header('Content-Type: image/svg+xml');
@@ -333,16 +333,16 @@ if ($api) {
               $width = imagesx($img);
               $height = imagesy($img);
               $newWidth = 320;
-              $newHeight = floor($height * ($newWidth / $width));
+              $newHeight = max(1, (int)floor($height * ($newWidth / max(1, $width))));
               $tmp = imagecreatetruecolor($newWidth, $newHeight);
-              if ($ext === 'png' || $ext === 'gif') {
+              if (in_array($ext, ['png', 'gif', 'webp', 'avif'])) {
                 imagealphablending($tmp, false);
                 imagesavealpha($tmp, true);
                 $transparent = imagecolorallocatealpha($tmp, 255, 255, 255, 127);
                 imagefilledrectangle($tmp, 0, 0, $newWidth, $newHeight, $transparent);
               }
               imagecopyresampled($tmp, $img, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
-              @imagewebp($tmp, $thumbPath, 50); // Quality 50 at 320px width guarantees size < 60KB
+              @imagewebp($tmp, $thumbPath, 65);
               imagedestroy($img);
               imagedestroy($tmp);
             }
@@ -735,29 +735,224 @@ if ($api) {
           break;
 
         case 'unzip':
+          @ini_set('memory_limit', '1024M');
+          if (function_exists('set_time_limit')) @set_time_limit(0);
+
           $item = $input['item'] ?? '';
           $src = $baseDir . '/' . $item;
-          if (!isValidPath($baseDir, $src) || !file_exists($src) || strtolower(pathinfo($src, PATHINFO_EXTENSION)) !== 'zip') {
-            throw new Exception('Invalid zip file');
+          if (!isValidPath($baseDir, $src) || !file_exists($src) || is_dir($src)) {
+            throw new Exception('Archive file not found');
           }
-          if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
-          $zip = new ZipArchive;
-          if ($zip->open($src) === TRUE) {
-            $folderName = pathinfo($src, PATHINFO_FILENAME);
-            $parentDir = dirname($src);
-            $extractTarget = $parentDir . '/' . $folderName;
-            
-            if (file_exists($extractTarget) && empty($input['override'])) {
-              $folderName = generateUniqueFolderName($parentDir, $folderName);
-              $extractTarget = $parentDir . '/' . $folderName;
+
+          $destDir = dirname($src);
+          $toFolder = !empty($input['to_folder']);
+
+          if ($toFolder) {
+            $baseArchiveName = basename($src);
+            $baseArchiveName = preg_replace('/\.(tar\.(gz|bz2|xz)|zip|tar|tgz|tbz2|tbz|gz|rar|7z|apk|epub)$/i', '', $baseArchiveName);
+            $baseArchiveName = rtrim($baseArchiveName, " .\t\n\r\0\x0B");
+            if ($baseArchiveName === '') $baseArchiveName = 'extracted_archive';
+
+            $targetSubfolder = $destDir . '/' . $baseArchiveName;
+            $counter = 1;
+            while (file_exists($targetSubfolder)) {
+              $targetSubfolder = $destDir . '/' . $baseArchiveName . '_(' . $counter . ')';
+              $counter++;
             }
-            if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
-            
-            $zip->extractTo($extractTarget);
-            $zip->close();
+            if (!is_dir($targetSubfolder)) {
+              @mkdir($targetSubfolder, 0755, true);
+            }
+            $destDir = $targetSubfolder;
+          }
+
+          $realDest = realpath($destDir);
+          if (!$realDest) {
+            @mkdir($destDir, 0755, true);
+            $realDest = realpath($destDir) ?: $destDir;
+          }
+
+          $lowerName = strtolower(basename($src));
+          $isZip = str_ends_with($lowerName, '.zip') || str_ends_with($lowerName, '.apk') || str_ends_with($lowerName, '.epub');
+          $isTarGz = str_ends_with($lowerName, '.tar.gz') || str_ends_with($lowerName, '.tgz');
+          $isTarBz2 = str_ends_with($lowerName, '.tar.bz2') || str_ends_with($lowerName, '.tbz2') || str_ends_with($lowerName, '.tbz');
+          $isTar = str_ends_with($lowerName, '.tar') || $isTarGz || $isTarBz2;
+          $isRar = str_ends_with($lowerName, '.rar');
+          $is7z = str_ends_with($lowerName, '.7z');
+          $isGz = str_ends_with($lowerName, '.gz') && !$isTarGz;
+          $extractedSuccess = false;
+
+          // 1. Primary Engine: ZipArchive
+          if ($isZip || (!$isTar && !$isRar && !$is7z && !$isGz)) {
+            if (class_exists('ZipArchive')) {
+              $zip = new ZipArchive();
+              if ($zip->open($src) === true) {
+                $extractedCount = 0;
+                for ($i = 0; $i < $zip->numFiles; $i++) {
+                  $entryName = $zip->getNameIndex($i);
+                  if ($entryName === false || $entryName === '') continue;
+
+                  $normalizedEntry = str_replace('\\', '/', $entryName);
+                  $isDir = str_ends_with($normalizedEntry, '/');
+
+                  $entryParts = explode('/', $normalizedEntry);
+                  $safeParts = [];
+                  foreach ($entryParts as $part) {
+                    if ($part === '' || $part === '.') continue;
+                    if ($part === '..') continue; // Prevent traversal attacks
+                    if (DIRECTORY_SEPARATOR === '\\') {
+                      $part = preg_replace('/[\:*?"<>|]/', '_', $part);
+                      $part = rtrim($part, " .");
+                    }
+                    if ($part !== '') $safeParts[] = $part;
+                  }
+                  if (empty($safeParts)) continue;
+
+                  $targetFullPath = $realDest . '/' . implode('/', $safeParts);
+
+                  if ($isDir) {
+                    if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0755, true);
+                  } else {
+                    $targetParent = dirname($targetFullPath);
+                    if (!is_dir($targetParent)) @mkdir($targetParent, 0755, true);
+
+                    $written = false;
+                    $stream = @$zip->getStream($entryName);
+                    if ($stream) {
+                      $out = @fopen($targetFullPath, 'wb');
+                      if ($out) {
+                        while (!feof($stream)) {
+                          $buf = fread($stream, 524288);
+                          if ($buf === false || $buf === '') break;
+                          fwrite($out, $buf);
+                        }
+                        fclose($out);
+                        $written = true;
+                      }
+                      fclose($stream);
+                    }
+
+                    if (!$written) {
+                      $content = @$zip->getFromIndex($i);
+                      if ($content !== false) {
+                        @file_put_contents($targetFullPath, $content);
+                        $written = true;
+                      }
+                    }
+
+                    if (!$written) {
+                      @$zip->extractTo($realDest, $entryName);
+                    }
+
+                    if (file_exists($targetFullPath)) $extractedCount++;
+                  }
+                }
+                $zip->close();
+                if ($extractedCount > 0) $extractedSuccess = true;
+              }
+            }
+          }
+
+          // 2. Primary Engine: PharData (.tar, .tar.gz, .tgz, .tar.bz2)
+          if (!$extractedSuccess && ($isTar || $isTarGz || $isTarBz2) && class_exists('PharData')) {
+            try {
+              $phar = new PharData($src);
+              if ($phar->extractTo($realDest, null, true)) {
+                $extractedSuccess = true;
+              }
+            } catch (Exception $e) {
+              try {
+                if ($isTarGz) {
+                  $phar = new PharData($src);
+                  $tarPhar = $phar->decompress();
+                  if ($tarPhar->extractTo($realDest, null, true)) {
+                    $extractedSuccess = true;
+                  }
+                }
+              } catch (Exception $ex) {}
+            }
+          }
+
+          // 3. Primary Engine: gzopen (.gz single file)
+          if (!$extractedSuccess && $isGz && function_exists('gzopen')) {
+            $outName = pathinfo($src, PATHINFO_FILENAME);
+            $targetPath = $realDest . '/' . $outName;
+            $gz = @gzopen($src, 'rb');
+            $out = @fopen($targetPath, 'wb');
+            if ($gz && $out) {
+              while (!gzeof($gz)) {
+                $chunk = gzread($gz, 524288);
+                if ($chunk === false || $chunk === '') break;
+                fwrite($out, $chunk);
+              }
+              gzclose($gz);
+              fclose($out);
+              $extractedSuccess = true;
+            }
+            if ($gz) @gzclose($gz);
+            if ($out) @fclose($out);
+          }
+
+          // 4. Primary Engine: RarArchive (.rar)
+          if (!$extractedSuccess && $isRar && class_exists('RarArchive')) {
+            $rar = @RarArchive::open($src);
+            if ($rar) {
+              $entries = @$rar->getEntries();
+              if ($entries) {
+                foreach ($entries as $entry) {
+                  $entryName = str_replace('\\', '/', $entry->getName());
+                  $parts = explode('/', $entryName);
+                  $safeParts = array_filter($parts, fn($p) => $p !== '' && $p !== '.' && $p !== '..');
+                  if (empty($safeParts)) continue;
+
+                  $targetFullPath = $realDest . '/' . implode('/', $safeParts);
+                  if ($entry->isDirectory()) {
+                    if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0755, true);
+                  } else {
+                    $targetParent = dirname($targetFullPath);
+                    if (!is_dir($targetParent)) @mkdir($targetParent, 0755, true);
+                    @$entry->extract($targetParent, basename($targetFullPath));
+                  }
+                }
+                $rar->close();
+                $extractedSuccess = true;
+              }
+              @$rar->close();
+            }
+          }
+
+          // 5. Universal CLI Fallback (7z, 7za, unzip, tar, unrar)
+          if (!$extractedSuccess && function_exists('exec') && !ini_get('safe_mode')) {
+            $escFile = escapeshellarg($src);
+            $escDest = escapeshellarg($realDest);
+
+            @exec("7z x -y -o{$escDest} {$escFile} 2>&1", $out7z, $ret7z);
+            if ($ret7z === 0) $extractedSuccess = true;
+
+            if (!$extractedSuccess) {
+              @exec("7za x -y -o{$escDest} {$escFile} 2>&1", $out7za, $ret7za);
+              if ($ret7za === 0) $extractedSuccess = true;
+            }
+
+            if (!$extractedSuccess && $isZip) {
+              @exec("unzip -o -q {$escFile} -d {$escDest} 2>&1", $outUnzip, $retUnzip);
+              if ($retUnzip === 0) $extractedSuccess = true;
+            }
+
+            if (!$extractedSuccess && $isTar) {
+              @exec("tar -xf {$escFile} -C {$escDest} 2>&1", $outTar, $retTar);
+              if ($retTar === 0) $extractedSuccess = true;
+            }
+
+            if (!$extractedSuccess && $isRar) {
+              @exec("unrar x -y -o+ {$escFile} {$escDest}/ 2>&1", $outRar, $retRar);
+              if ($retRar === 0) $extractedSuccess = true;
+            }
+          }
+
+          if ($extractedSuccess) {
             echo json_encode(['success' => true]);
           } else {
-            throw new Exception('Failed to extract ZIP archive');
+            throw new Exception('Failed to extract archive. Format may be unsupported or corrupted.');
           }
           break;
 
@@ -814,7 +1009,7 @@ if ($api) {
                     'size' => $stat['size'],
                     'formatSize' => formatBytes($stat['size']),
                     'ext' => $ext,
-                    'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                    'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif']),
                     'starred' => $starred
                   ];
                 }
@@ -843,7 +1038,7 @@ if ($api) {
               'size' => $stat['size'],
               'formatSize' => formatBytes($stat['size']),
               'ext' => $ext,
-              'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+              'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif']),
               'starred' => $starred
             ];
             if (is_dir($path)) {
@@ -903,7 +1098,7 @@ if ($api) {
                   'size' => $file->getSize(),
                   'formatSize' => formatBytes($file->getSize()),
                   'ext' => $ext,
-                  'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                  'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif']),
                   'starred' => false,
                   'is_version' => true,
                   'original_file' => $origName,
@@ -933,7 +1128,7 @@ if ($api) {
                 'size' => $stat['size'],
                 'formatSize' => formatBytes($stat['size']),
                 'ext' => $ext,
-                'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+                'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif'])
               ];
             }
           }
@@ -1179,6 +1374,29 @@ if (isset($_GET['batch'])) {
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%230b57d0' d='M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383'/%3E%3C/svg%3E">
     <meta name="theme-color" content="#0b57d0">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/5.1.0/diff.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.min.css">
+    <style>
+      .markdown-body {
+        box-sizing: border-box;
+        min-width: 200px;
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 24px;
+        background-color: transparent !important;
+        color: var(--theme-on-surface) !important;
+        font-family: var(--font-body) !important;
+      }
+      [data-theme="light"] .markdown-body {
+        color: #1f1f1f !important;
+      }
+      [data-theme="light"] .markdown-body pre,
+      [data-theme="light"] .markdown-body code {
+        background-color: #f6f8fa !important;
+        color: #24292f !important;
+      }
+    </style>
     <script>
       const IS_PROTECTED = <?php echo $config['protected'] ? 'true' : 'false'; ?>;
       const IS_AUTHED = <?php echo !empty($_SESSION['auth']) ? 'true' : 'false'; ?>;
@@ -1332,10 +1550,11 @@ if (isset($_GET['batch'])) {
       .item-card.selected { background-color: var(--theme-secondary-container); border-color: var(--theme-primary); color: var(--theme-on-secondary-container); }
       .item-card.drag-target { border: 2px dashed var(--theme-primary) !important; background-color: var(--theme-primary-container) !important; }
       
-      .card-checkbox { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
-      .item-card:hover .card-checkbox, .item-card.selected .card-checkbox { opacity: 1; }
+      .card-checkbox { position: absolute; top: 8px; left: 8px; width: 28px; height: 28px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); cursor: pointer; border-radius: 50%; }
+      .item-card:hover .card-checkbox, .item-card.selected .card-checkbox, body.select-mode .card-checkbox { opacity: 1 !important; }
       .item-card.selected .card-checkbox { color: var(--theme-primary); font-variation-settings: 'FILL' 1; }
-      .card-checkbox .material-symbols-rounded { color: inherit; }
+      .card-checkbox .material-symbols-rounded { color: inherit; font-size: 22px; }
+      body.select-mode .item-card { cursor: pointer; }
       
       .card-star { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
       .item-card:hover .card-star, .item-card.starred .card-star { opacity: 1; }
@@ -1707,6 +1926,7 @@ if (isset($_GET['batch'])) {
         <button class="icon-btn" onclick="app.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
         <div class="editor-title" id="editorTitle">filename.txt</div>
         <div class="header-actions" id="editorActions">
+          <button class="icon-btn" id="editorMarkdownBtn" onclick="app.toggleMarkdownMode()" title="Toggle GitHub Markdown Preview" style="display: none;"><span class="material-symbols-rounded">preview</span></button>
           <button class="icon-btn" onclick="app.toggleEditorWrap()" id="editorWrapBtn" title="Toggle Word Wrap"><span class="material-symbols-rounded">wrap_text</span></button>
           <button class="icon-btn" onclick="app.editorFind()" title="Find and Replace"><span class="material-symbols-rounded">search</span></button>
           <button class="icon-btn" onclick="app.editorUndo()" title="Undo"><span class="material-symbols-rounded">undo</span></button>
@@ -1724,6 +1944,7 @@ if (isset($_GET['batch'])) {
         <div class="mobile-editor-container" id="mobileEditorContainer">
           <textarea class="mobile-textarea" id="mobileTextarea" spellcheck="false" autocomplete="off"></textarea>
         </div>
+        <div id="markdownPreviewContainer" class="markdown-body" style="display: none; flex: 1; overflow-y: auto; width: 100%; height: 100%;"></div>
         <div id="mediaViewerContainer" style="flex: 1; display: none; flex-direction: column;"></div>
       </div>
     </div>
@@ -2306,7 +2527,7 @@ if (isset($_GET['batch'])) {
           if (this.currentFilter === 'all') return files;
           const map = {
             documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf', 'zip'],
-            images: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
+            images: ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif'],
             audio: ['mp3', 'wav', 'ogg'],
             video: ['mp4', 'webm']
           };
@@ -2493,8 +2714,8 @@ if (isset($_GET['batch'])) {
             if (['mp3','wav','ogg'].includes(item.ext)) icon = 'audiotrack';
           }
 
-          const checkboxHtml = `<div class="card-checkbox" onclick="app.toggleSelect(event, '${item.path}')"><span class="material-symbols-rounded">check_circle</span></div>`;
-          const starHtml = `<div class="card-star" onclick="app.toggleStar(event, '${item.path}')"><span class="material-symbols-rounded">star</span></div>`;
+          const checkboxHtml = `<div class="card-checkbox"><span class="material-symbols-rounded">check_circle</span></div>`;
+          const starHtml = `<div class="card-star"><span class="material-symbols-rounded">star</span></div>`;
           const fIconClass = isFolder ? 'folder-icon' : '';
           const nameWithHighlight = this.highlightMatch(item.name);
 
@@ -2561,6 +2782,24 @@ if (isset($_GET['batch'])) {
                   this.loadDirectory(this.currentPath);
                 }
               }
+            });
+          }
+
+          const chkBox = el.querySelector('.card-checkbox');
+          if (chkBox) {
+            chkBox.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.toggleSelect(e, item.path || item.uniq);
+            });
+          }
+
+          const starBtn = el.querySelector('.card-star');
+          if (starBtn) {
+            starBtn.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.toggleStar(e, item.path);
             });
           }
 
@@ -2634,18 +2873,24 @@ if (isset($_GET['batch'])) {
           if (!force && e && e.target.closest('.item-card')) return;
           this.selectedItems.clear();
           this.isSelectMode = false;
+          document.body.classList.remove('select-mode');
           this.syncSelectionUI();
           this.renderPropertiesEmpty();
         }
 
         toggleSelectMode() {
           this.isSelectMode = !this.isSelectMode;
-          if (this.isSelectMode) this.showToast('Select mode enabled. Tap items to select.');
-          else this.clearSelection(null, true);
+          document.body.classList.toggle('select-mode', this.isSelectMode);
+          if (this.isSelectMode) {
+            this.showToast('Select mode enabled. Tap items to select.');
+          } else {
+            this.clearSelection(null, true);
+          }
         }
 
         selectAll() {
           this.isSelectMode = true;
+          document.body.classList.add('select-mode');
           this.selectedItems.clear();
           if (this.currentViewMode === 'trash') {
             document.querySelectorAll('#filesList .item-card').forEach(el => {
@@ -2932,8 +3177,10 @@ if (isset($_GET['batch'])) {
               addMenuItem('open_in_new', 'Open in a new tab', () => window.open(`?api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
               addMenuItem('download', 'Download', () => window.location.href = `?download=${encodeURIComponent(item.path)}`);
               addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
-              if (item.ext === 'zip') {
-                addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
+              const isArchive = ['zip', 'rar', 'tar', 'gz', 'tgz', 'tbz', 'tbz2', '7z', 'apk', 'epub'].includes(item.ext) || item.name.toLowerCase().endsWith('.tar.gz') || item.name.toLowerCase().endsWith('.tar.bz2');
+              if (isArchive) {
+                addMenuItem('folder_zip', 'Extract Here', () => this.extractZip(item.path, false));
+                addMenuItem('drive_folder_upload', 'Extract to Folder', () => this.extractZip(item.path, true));
               } else if (item.ext === 'enc') {
                 addMenuItem('lock_open', 'Decrypt File', () => this.decryptFile(item.path));
               } else {
@@ -3279,12 +3526,58 @@ if (isset($_GET['batch'])) {
           }
         }
 
-        async extractZip(path) {
-          this.showToast('Extracting ZIP...');
-          const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path });
+        async extractZip(path, toFolder = false) {
+          this.showToast(toFolder ? 'Extracting to folder...' : 'Extracting archive here...');
+          const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path, to_folder: toFolder ? 1 : 0 });
           if (res) {
-            this.showToast('ZIP extracted successfully!');
+            this.showToast(toFolder ? 'Extracted to folder!' : 'Archive extracted successfully!');
             this.loadDirectory(this.currentPath);
+          }
+        }
+
+        toggleMarkdownMode() {
+          this.isMarkdownMode = !this.isMarkdownMode;
+          const mdBtn = document.getElementById('editorMarkdownBtn');
+          const mdPreview = document.getElementById('markdownPreviewContainer');
+          const deskContainer = document.getElementById('desktopEditorContainer');
+          const mobContainer = document.getElementById('mobileEditorContainer');
+
+          if (this.isMarkdownMode) {
+            let rawText = '';
+            if (window.innerWidth <= 768) {
+              rawText = document.getElementById('mobileTextarea').value;
+            } else if (this.editor) {
+              rawText = this.editor.getValue();
+            }
+
+            const parsed = typeof marked !== 'undefined' ? marked.parse(rawText) : rawText;
+            const clean = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(parsed) : parsed;
+
+            mdPreview.innerHTML = clean;
+            mdPreview.style.display = 'block';
+            deskContainer.style.display = 'none';
+            mobContainer.style.display = 'none';
+
+            if (mdBtn) {
+              mdBtn.classList.add('active');
+              mdBtn.querySelector('.material-symbols-rounded').textContent = 'edit';
+              mdBtn.title = 'Switch to Edit Mode';
+            }
+          } else {
+            mdPreview.style.display = 'none';
+            mdPreview.innerHTML = '';
+            if (window.innerWidth <= 768) {
+              mobContainer.style.display = 'flex';
+            } else {
+              deskContainer.style.display = 'block';
+              if (this.editor) setTimeout(() => this.editor.refresh(), 30);
+            }
+
+            if (mdBtn) {
+              mdBtn.classList.remove('active');
+              mdBtn.querySelector('.material-symbols-rounded').textContent = 'preview';
+              mdBtn.title = 'Toggle GitHub Markdown Preview';
+            }
           }
         }
 
@@ -3475,6 +3768,20 @@ if (isset($_GET['batch'])) {
 
             actions.style.display = 'flex';
             this.updateEditorWrapUI();
+
+            this.isMarkdownMode = false;
+            const mdBtn = document.getElementById('editorMarkdownBtn');
+            const mdPreview = document.getElementById('markdownPreviewContainer');
+            if (mdPreview) {
+              mdPreview.style.display = 'none';
+              mdPreview.innerHTML = '';
+            }
+            if (mdBtn) {
+              mdBtn.classList.remove('active');
+              mdBtn.querySelector('.material-symbols-rounded').textContent = 'preview';
+              mdBtn.title = 'Toggle GitHub Markdown Preview';
+              mdBtn.style.display = ['md', 'markdown', 'txt'].includes(item.ext.toLowerCase()) ? 'flex' : 'none';
+            }
             const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
             if (res && res.success) {
               const contentLength = res.content ? res.content.length : 0;
@@ -3739,6 +4046,12 @@ if (isset($_GET['batch'])) {
 
         closeEditor(syncHistory = true) {
           this.closeFindReplace();
+          this.isMarkdownMode = false;
+          const mdPreview = document.getElementById('markdownPreviewContainer');
+          if (mdPreview) {
+            mdPreview.style.display = 'none';
+            mdPreview.innerHTML = '';
+          }
           document.getElementById('editorOverlay').style.display = 'none';
           document.getElementById('mediaViewerContainer').innerHTML = '';
           this.currentEditFile = null;
