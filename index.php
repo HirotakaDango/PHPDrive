@@ -1651,6 +1651,17 @@ if (isset($_GET['batch'])) {
       .media-player-container audio { width: 100%; max-width: 480px; }
       .image-preview-container { flex: 1; display: flex; align-items: center; justify-content: center; background: var(--theme-surface-container); overflow: auto; padding: 16px; }
       .image-preview-container img { max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+
+      .media-nav-btn { position: fixed; top: 50%; transform: translateY(-50%); width: 48px; height: 48px; border-radius: 50%; background: var(--theme-surface-container-high); color: var(--theme-on-surface); box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 3600; display: flex; align-items: center; justify-content: center; border: 1px solid var(--theme-outline-variant); cursor: pointer; transition: background-color var(--transition), transform 0.15s ease; }
+      .media-nav-btn:hover { background: var(--theme-secondary-container); color: var(--theme-on-secondary-container); transform: translateY(-50%) scale(1.08); }
+      .media-nav-btn:active { transform: translateY(-50%) scale(0.95); }
+      .media-prev-btn { left: 20px; }
+      .media-next-btn { right: 20px; }
+      @media (max-width: 768px) {
+        .media-nav-btn { width: 40px; height: 40px; }
+        .media-prev-btn { left: 8px; }
+        .media-next-btn { right: 8px; }
+      }
       
       .snackbar-container { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
       .snackbar { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 14px 16px; border-radius: 4px; font-size: 14px; display: flex; align-items: center; justify-content: space-between; min-width: 288px; max-width: 400px; box-shadow: 0 3px 5px -1px rgba(0,0,0,0.2); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
@@ -1888,6 +1899,8 @@ if (isset($_GET['batch'])) {
 
     <!-- Dedicated Image Preview Overlay (Auto-fits Image Scale) -->
     <div class="modal-overlay" id="imageOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) app.closeImage()">
+      <button class="media-nav-btn media-prev-btn" onclick="event.stopPropagation(); app.navigateMedia(-1)" title="Previous (Left Arrow)"><span class="material-symbols-rounded">chevron_left</span></button>
+      <button class="media-nav-btn media-next-btn" onclick="event.stopPropagation(); app.navigateMedia(1)" title="Next (Right Arrow)"><span class="material-symbols-rounded">chevron_right</span></button>
       <div style="max-width: 95%; max-height: 95%; width: auto; background: transparent; box-shadow: none; padding: 0; display: flex; align-items: center; justify-content: center; position: relative;">
         <button class="icon-btn" onclick="app.closeImage()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
         <div id="imageModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 90vh;"></div>
@@ -1896,6 +1909,8 @@ if (isset($_GET['batch'])) {
 
     <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
     <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) app.closeMedia()">
+      <button class="media-nav-btn media-prev-btn" onclick="event.stopPropagation(); app.navigateMedia(-1)" title="Previous (Left Arrow)"><span class="material-symbols-rounded">chevron_left</span></button>
+      <button class="media-nav-btn media-next-btn" onclick="event.stopPropagation(); app.navigateMedia(1)" title="Next (Right Arrow)"><span class="material-symbols-rounded">chevron_right</span></button>
       <div class="modal" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; overflow: visible; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
         <button class="icon-btn" onclick="app.closeMedia()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"><span class="material-symbols-rounded">close</span></button>
         <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
@@ -1921,16 +1936,23 @@ if (isset($_GET['batch'])) {
       </div>
     </div>
 
+    <div class="floating-menu" id="editorMoreMenu" style="z-index: 3500; display: none;">
+      <div class="menu-item" id="editorMarkdownBtn" onclick="app.toggleMarkdownMode(); app.closeEditorMenu();" style="display: none;"><span class="material-symbols-rounded">preview</span><span id="editorMarkdownText">Markdown Preview</span></div>
+      <div class="menu-item" onclick="app.toggleEditorWrap(); app.closeEditorMenu();"><span class="material-symbols-rounded" id="editorWrapIcon">wrap_text</span><span id="editorWrapText">Word Wrap: ON</span></div>
+      <div class="menu-item" onclick="app.editorFind(); app.closeEditorMenu();"><span class="material-symbols-rounded">search</span>Find &amp; Replace</div>
+      <div class="menu-item" onclick="app.editorUndo(); app.closeEditorMenu();"><span class="material-symbols-rounded">undo</span>Undo</div>
+      <div class="menu-item" onclick="app.editorRedo(); app.closeEditorMenu();"><span class="material-symbols-rounded">redo</span>Redo</div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" onclick="app.downloadCurrentEditFile(); app.closeEditorMenu();"><span class="material-symbols-rounded">download</span>Download</div>
+    </div>
+
     <div class="editor-overlay" id="editorOverlay">
       <div class="editor-header">
         <button class="icon-btn" onclick="app.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
         <div class="editor-title" id="editorTitle">filename.txt</div>
         <div class="header-actions" id="editorActions">
-          <button class="icon-btn" id="editorMarkdownBtn" onclick="app.toggleMarkdownMode()" title="Toggle GitHub Markdown Preview" style="display: none;"><span class="material-symbols-rounded">preview</span></button>
-          <button class="icon-btn" onclick="app.toggleEditorWrap()" id="editorWrapBtn" title="Toggle Word Wrap"><span class="material-symbols-rounded">wrap_text</span></button>
-          <button class="icon-btn" onclick="app.editorFind()" title="Find and Replace"><span class="material-symbols-rounded">search</span></button>
-          <button class="icon-btn" onclick="app.editorUndo()" title="Undo"><span class="material-symbols-rounded">undo</span></button>
-          <button class="icon-btn" onclick="app.editorRedo()" title="Redo"><span class="material-symbols-rounded">redo</span></button>
+          <button class="icon-btn" onclick="app.downloadCurrentEditFile()" title="Download"><span class="material-symbols-rounded">download</span></button>
+          <button class="icon-btn" onclick="app.showEditorMoreMenu(event)" id="editorMoreBtn" title="More options"><span class="material-symbols-rounded">more_vert</span></button>
           <button class="btn btn-filled" onclick="app.saveFile()">
             <span class="material-symbols-rounded" style="font-size:18px;">save</span>
             <span class="editor-save-text">Save</span>
@@ -2186,6 +2208,8 @@ if (isset($_GET['batch'])) {
             document.getElementById('contextMenu').style.display = 'none';
             document.getElementById('sortMenu').style.display = 'none';
             document.getElementById('moreMenu').style.display = 'none';
+            const emm = document.getElementById('editorMoreMenu');
+            if (emm) emm.style.display = 'none';
           });
 
           const dropZone = document.getElementById('dropZone');
@@ -2292,6 +2316,17 @@ if (isset($_GET['batch'])) {
           });
 
           document.addEventListener('keydown', (e) => {
+            const isImgOpen = document.getElementById('imageOverlay').style.display === 'flex';
+            const isMedOpen = document.getElementById('mediaOverlay').style.display === 'flex';
+            if (isImgOpen || isMedOpen) {
+              if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                this.navigateMedia(-1);
+              } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                this.navigateMedia(1);
+              }
+            }
             if (e.ctrlKey && e.key === 's' && document.getElementById('editorOverlay').style.display === 'flex') {
               e.preventDefault();
               this.saveFile();
@@ -2759,26 +2794,49 @@ if (isset($_GET['batch'])) {
 
           el.addEventListener('dragstart', (e) => {
             if (window.innerWidth <= 768) return e.preventDefault();
-            this.draggedItemName = item.path;
-            e.dataTransfer.setData('text/plain', item.path);
+            const items = (this.selectedItems.has(item.path) && this.selectedItems.size > 0)
+              ? Array.from(this.selectedItems)
+              : [item.path];
+            const payload = JSON.stringify(items);
+            e.dataTransfer.setData('application/json', payload);
+            e.dataTransfer.setData('text/plain', payload);
           });
 
           if (isFolder) {
             el.addEventListener('dragover', (e) => {
               if (window.innerWidth <= 768) return;
               e.preventDefault();
+              e.stopPropagation();
               el.classList.add('drag-target');
             });
-            el.addEventListener('dragleave', () => el.classList.remove('drag-target'));
+            el.addEventListener('dragleave', (e) => {
+              e.stopPropagation();
+              el.classList.remove('drag-target');
+            });
             el.addEventListener('drop', async (e) => {
               if (window.innerWidth <= 768) return;
               e.preventDefault();
+              e.stopPropagation();
               el.classList.remove('drag-target');
-              const movedItem = e.dataTransfer.getData('text/plain');
-              if (movedItem && movedItem !== item.path) {
-                const res = await this.fetchAPI('move', 'POST', { action: 'move', item: movedItem, target: item.path });
+
+              let movedItems = [];
+              const rawData = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain');
+              if (rawData) {
+                try {
+                  const parsed = JSON.parse(rawData);
+                  movedItems = Array.isArray(parsed) ? parsed : [parsed];
+                } catch (_) {
+                  movedItems = [rawData];
+                }
+              }
+
+              movedItems = movedItems.filter(p => p && p !== item.path && !item.path.startsWith(p + '/'));
+
+              if (movedItems.length > 0) {
+                const res = await this.fetchAPI('move_items', 'POST', { action: 'move_items', items: movedItems, target: item.path });
                 if (res) {
-                  this.showToast(`Moved ${movedItem.split('/').pop()} to ${item.name}`);
+                  this.showToast(`Moved ${movedItems.length} item(s) to ${item.name}`);
+                  this.clearSelection(null, true);
                   this.loadDirectory(this.currentPath);
                 }
               }
@@ -3535,9 +3593,54 @@ if (isset($_GET['batch'])) {
           }
         }
 
+        downloadCurrentEditFile() {
+          if (!this.currentEditFile) return;
+          window.location.href = `?download=${encodeURIComponent(this.currentEditFile)}`;
+        }
+
+        showEditorMoreMenu(e) {
+          e.stopPropagation();
+          const menu = document.getElementById('editorMoreMenu');
+          if (!menu) return;
+          const isVisible = menu.style.display === 'flex';
+          menu.style.display = isVisible ? 'none' : 'flex';
+          if (!isVisible) {
+            const rect = e.currentTarget.getBoundingClientRect();
+            menu.style.top = `${rect.bottom + 8}px`;
+            menu.style.right = `${Math.max(16, window.innerWidth - rect.right)}px`;
+            menu.style.left = 'auto';
+          }
+        }
+
+        closeEditorMenu() {
+          const menu = document.getElementById('editorMoreMenu');
+          if (menu) menu.style.display = 'none';
+        }
+
+        getMediaFiles() {
+          const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif', 'mp4', 'webm', 'mkv', 'm4v', 'mov', 'avi', 'ts', 'mp3', 'wav', 'ogg', 'flac', 'm4a', 'opus'];
+          const source = (this.filteredFiles && this.filteredFiles.length > 0) ? this.filteredFiles : (this.data.files || []);
+          return source.filter(f => mediaExts.includes((f.ext || '').toLowerCase()) || f.isImage);
+        }
+
+        navigateMedia(dir) {
+          const list = this.getMediaFiles();
+          if (!list || list.length === 0) return;
+          const currentIdx = list.findIndex(f => f.path === this.currentEditFile);
+          if (currentIdx === -1) {
+            this.openPreviewOrEditor(list[0], true);
+            return;
+          }
+          let nextIdx = currentIdx + dir;
+          if (nextIdx < 0) nextIdx = list.length - 1;
+          else if (nextIdx >= list.length) nextIdx = 0;
+          this.openPreviewOrEditor(list[nextIdx], true);
+        }
+
         toggleMarkdownMode() {
           this.isMarkdownMode = !this.isMarkdownMode;
           const mdBtn = document.getElementById('editorMarkdownBtn');
+          const mdText = document.getElementById('editorMarkdownText');
           const mdPreview = document.getElementById('markdownPreviewContainer');
           const deskContainer = document.getElementById('desktopEditorContainer');
           const mobContainer = document.getElementById('mobileEditorContainer');
@@ -3561,7 +3664,7 @@ if (isset($_GET['batch'])) {
             if (mdBtn) {
               mdBtn.classList.add('active');
               mdBtn.querySelector('.material-symbols-rounded').textContent = 'edit';
-              mdBtn.title = 'Switch to Edit Mode';
+              if (mdText) mdText.textContent = 'Edit Mode';
             }
           } else {
             mdPreview.style.display = 'none';
@@ -3576,7 +3679,7 @@ if (isset($_GET['batch'])) {
             if (mdBtn) {
               mdBtn.classList.remove('active');
               mdBtn.querySelector('.material-symbols-rounded').textContent = 'preview';
-              mdBtn.title = 'Toggle GitHub Markdown Preview';
+              if (mdText) mdText.textContent = 'Markdown Preview';
             }
           }
         }
@@ -3685,6 +3788,22 @@ if (isset($_GET['batch'])) {
             return;
           }
           this.currentEditFile = item.path;
+
+          const oldImgOverlay = document.getElementById('imageOverlay');
+          if (oldImgOverlay) {
+            oldImgOverlay.style.display = 'none';
+            document.getElementById('imageModalContent').innerHTML = '';
+          }
+          const oldMedOverlay = document.getElementById('mediaOverlay');
+          if (oldMedOverlay) {
+            oldMedOverlay.style.display = 'none';
+            document.getElementById('mediaModalContent').innerHTML = '';
+          }
+
+          const hasMultipleMedia = this.getMediaFiles().length > 1;
+          document.querySelectorAll('.media-nav-btn').forEach(btn => {
+            btn.style.display = hasMultipleMedia ? 'flex' : 'none';
+          });
           
           const params = new URLSearchParams();
           if (this.currentPath) params.set('path', this.currentPath);
@@ -3779,7 +3898,8 @@ if (isset($_GET['batch'])) {
             if (mdBtn) {
               mdBtn.classList.remove('active');
               mdBtn.querySelector('.material-symbols-rounded').textContent = 'preview';
-              mdBtn.title = 'Toggle GitHub Markdown Preview';
+              const mdText = document.getElementById('editorMarkdownText');
+              if (mdText) mdText.textContent = 'Markdown Preview';
               mdBtn.style.display = ['md', 'markdown', 'txt'].includes(item.ext.toLowerCase()) ? 'flex' : 'none';
             }
             const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
@@ -3846,6 +3966,7 @@ if (isset($_GET['batch'])) {
             const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
             window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
           }
+          this.loadDirectory(this.currentPath);
         }
 
         closeMedia(syncHistory = true) {
@@ -3860,6 +3981,7 @@ if (isset($_GET['batch'])) {
             const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
             window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
           }
+          this.loadDirectory(this.currentPath);
         }
 
         insertMobileChar(char) {
@@ -4028,14 +4150,10 @@ if (isset($_GET['batch'])) {
         }
 
         updateEditorWrapUI() {
-          const btn = document.getElementById('editorWrapBtn');
-          if (btn) {
-            const icon = btn.querySelector('.material-symbols-rounded');
-            if (icon) {
-              icon.textContent = this.editorWrap ? 'wrap_text' : 'segment';
-              btn.style.color = this.editorWrap ? 'var(--theme-primary)' : 'var(--theme-on-surface-variant)';
-            }
-          }
+          const icon = document.getElementById('editorWrapIcon');
+          const text = document.getElementById('editorWrapText');
+          if (icon) icon.textContent = this.editorWrap ? 'wrap_text' : 'segment';
+          if (text) text.textContent = this.editorWrap ? 'Word Wrap: ON' : 'Word Wrap: OFF';
           const mobileTa = document.getElementById('mobileTextarea');
           if (mobileTa) {
             mobileTa.setAttribute('wrap', this.editorWrap ? 'soft' : 'off');
@@ -4045,6 +4163,8 @@ if (isset($_GET['batch'])) {
         }
 
         closeEditor(syncHistory = true) {
+          const emm = document.getElementById('editorMoreMenu');
+          if (emm) emm.style.display = 'none';
           this.closeFindReplace();
           this.isMarkdownMode = false;
           const mdPreview = document.getElementById('markdownPreviewContainer');
@@ -4065,6 +4185,7 @@ if (isset($_GET['batch'])) {
             const qs = this.currentPath ? `?path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : window.location.pathname;
             window.history.pushState({ path: this.currentPath, view: this.currentViewMode }, '', qs);
           }
+          this.loadDirectory(this.currentPath);
         }
 
         async saveFile() {
@@ -4076,7 +4197,10 @@ if (isset($_GET['batch'])) {
             content = this.editor.getValue();
           }
           const res = await this.fetchAPI('write', 'POST', { action: 'write', file: this.currentEditFile, content });
-          if (res) this.showToast('File saved');
+          if (res) {
+            this.showToast('File saved');
+            this.loadDirectory(this.currentPath);
+          }
         }
 
         batchDownload(type) {
