@@ -1396,6 +1396,42 @@ if (isset($_GET['batch'])) {
         background-color: #f6f8fa !important;
         color: #24292f !important;
       }
+      .markdown-body pre {
+        position: relative;
+      }
+      .markdown-body .code-copy-btn {
+        position: sticky;
+        top: 8px;
+        right: 8px;
+        float: right;
+        z-index: 5;
+        margin-top: -4px;
+        margin-right: -4px;
+        margin-bottom: -28px;
+        background: var(--theme-surface-container-high);
+        color: var(--theme-on-surface-variant);
+        border: 1px solid var(--theme-outline-variant);
+        border-radius: 6px;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+        opacity: 0.3;
+        transition: opacity 0.2s ease, background-color var(--transition), color var(--transition);
+      }
+      .markdown-body pre:hover .code-copy-btn,
+      .markdown-body .code-copy-btn:focus,
+      .markdown-body .code-copy-btn.copied {
+        opacity: 1;
+      }
+      .markdown-body .code-copy-btn:hover {
+        background-color: var(--theme-secondary-container);
+        color: var(--theme-on-secondary-container);
+      }
     </style>
     <script>
       const IS_PROTECTED = <?php echo $config['protected'] ? 'true' : 'false'; ?>;
@@ -3657,6 +3693,35 @@ if (isset($_GET['batch'])) {
             const clean = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(parsed) : parsed;
 
             mdPreview.innerHTML = clean;
+
+            mdPreview.querySelectorAll('pre').forEach(pre => {
+              const code = pre.querySelector('code');
+              if (!code || pre.querySelector('.code-copy-btn')) return;
+
+              const copyBtn = document.createElement('button');
+              copyBtn.type = 'button';
+              copyBtn.className = 'code-copy-btn';
+              copyBtn.title = 'Copy code';
+              copyBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size: 16px;">content_copy</span>';
+
+              copyBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try {
+                  await navigator.clipboard.writeText(code.textContent);
+                  copyBtn.classList.add('copied');
+                  copyBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size: 16px; color: #4caf50;">check</span>';
+                  setTimeout(() => {
+                    copyBtn.classList.remove('copied');
+                    copyBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size: 16px;">content_copy</span>';
+                  }, 2000);
+                } catch (err) {
+                  console.error('Failed to copy code: ', err);
+                }
+              });
+
+              pre.insertBefore(copyBtn, pre.firstChild);
+            });
+
             mdPreview.style.display = 'block';
             deskContainer.style.display = 'none';
             mobContainer.style.display = 'none';
