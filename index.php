@@ -1396,18 +1396,18 @@ if (isset($_GET['batch'])) {
         background-color: #f6f8fa !important;
         color: #24292f !important;
       }
-      .markdown-body pre {
+      .markdown-body .code-block-wrapper {
         position: relative;
+        margin-bottom: 16px;
+      }
+      .markdown-body .code-block-wrapper pre {
+        margin-bottom: 0 !important;
       }
       .markdown-body .code-copy-btn {
-        position: sticky;
+        position: absolute;
         top: 8px;
         right: 8px;
-        float: right;
-        z-index: 5;
-        margin-top: -4px;
-        margin-right: -4px;
-        margin-bottom: -28px;
+        z-index: 10;
         background: var(--theme-surface-container-high);
         color: var(--theme-on-surface-variant);
         border: 1px solid var(--theme-outline-variant);
@@ -1423,7 +1423,7 @@ if (isset($_GET['batch'])) {
         opacity: 0.3;
         transition: opacity 0.2s ease, background-color var(--transition), color var(--transition);
       }
-      .markdown-body pre:hover .code-copy-btn,
+      .markdown-body .code-block-wrapper:hover .code-copy-btn,
       .markdown-body .code-copy-btn:focus,
       .markdown-body .code-copy-btn.copied {
         opacity: 1;
@@ -3696,7 +3696,12 @@ if (isset($_GET['batch'])) {
 
             mdPreview.querySelectorAll('pre').forEach(pre => {
               const code = pre.querySelector('code');
-              if (!code || pre.querySelector('.code-copy-btn')) return;
+              if (!code || pre.parentElement.classList.contains('code-block-wrapper')) return;
+
+              const wrapper = document.createElement('div');
+              wrapper.className = 'code-block-wrapper';
+              pre.parentNode.insertBefore(wrapper, pre);
+              wrapper.appendChild(pre);
 
               const copyBtn = document.createElement('button');
               copyBtn.type = 'button';
@@ -3719,7 +3724,7 @@ if (isset($_GET['batch'])) {
                 }
               });
 
-              pre.insertBefore(copyBtn, pre.firstChild);
+              wrapper.appendChild(copyBtn);
             });
 
             mdPreview.style.display = 'block';
